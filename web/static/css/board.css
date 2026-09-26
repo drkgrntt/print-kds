@@ -153,14 +153,21 @@
 	flex: 1 1 100%;
 	display: flex;
 	flex-wrap: wrap;
-	align-items: center;
+	/* flex-end, not center: the Passed field stacks a label above its
+	   input now, making it taller than the plain reason input - centering
+	   would offset the two inputs' edges instead of lining them up. */
+	align-items: flex-end;
 	gap: var(--space-xs);
 }
 
+/* Stacked (label above input) rather than side-by-side so this field
+   doesn't eat into the width the reason input and submit button need on
+   a narrow card column. */
 .qc-partial__field {
 	display: flex;
-	align-items: center;
-	gap: var(--space-xs);
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
 	color: var(--color-text-muted);
 	font-size: 0.85rem;
 }
@@ -190,8 +197,10 @@
 /* Forces its own full-width line below the Passed/reason inputs (via
    flex-basis: 100% in the wrapping .qc-partial row) instead of squeezing
    onto their line - there isn't reliably enough card width for all three
-   on a touchscreen-sized card. */
-.qc-partial__submit {
+   on a touchscreen-sized card. Selector needs both classes to out-specify
+   ".card__actions .btn"'s "flex: 1" (also two classes), which otherwise
+   wins the cascade and silently drops the flex-basis: 100% below. */
+.qc-partial .qc-partial__submit {
 	flex: 1 1 100%;
 	min-height: var(--touch-target-min);
 	min-width: var(--touch-target-min);
