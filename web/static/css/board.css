@@ -70,12 +70,165 @@
 	font-weight: 700;
 }
 
+/* How long this card has been sitting in its current column - a
+   shop-floor-glance signal for spotting a stage that's backed up (e.g.
+   cleaning_qc piling up), not a precise audit trail. */
+.card__elapsed {
+	color: var(--color-text-muted);
+	font-size: 0.85rem;
+}
+
+/* Flags a queued card that jumped the line because it's a reprint (see
+   board.Store.BoardColumns' reprint-priority sort) - reuses the same
+   danger token as .btn--danger so "this needed a redo" reads consistently
+   across the board rather than inventing a new color. */
+.card__badge--reprint {
+	display: inline-block;
+	align-self: flex-start;
+	color: var(--color-danger);
+	border: 1px solid var(--color-danger);
+	border-radius: var(--radius-md);
+	padding: 0.15em 0.6em;
+	font-size: 0.85rem;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+}
+
 .card__actions {
 	display: flex;
+	flex-wrap: wrap;
 	gap: var(--space-sm);
 	margin-top: var(--space-sm);
 }
 
 .card__actions .btn {
 	flex: 1;
+}
+
+/* cleaning_qc's fast-path PASS QC / RE-PRINT buttons are each their own
+   tiny form (so they can post a fixed quantity_passed with no typing) -
+   size them like the plain action buttons they replace. */
+.qc-fast {
+	flex: 1;
+	display: flex;
+}
+
+.qc-fast .btn {
+	width: 100%;
+}
+
+/* The partial-QC mini-form is the only place a split quantity or a
+   reprint reason gets entered, so it takes the full card width below the
+   two fast-path buttons rather than competing with them for a column. */
+.qc-partial {
+	flex: 1 1 100%;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-xs);
+}
+
+.qc-partial__field {
+	display: flex;
+	align-items: center;
+	gap: var(--space-xs);
+	color: var(--color-text-muted);
+	font-size: 0.85rem;
+}
+
+.qc-partial__field input[type="number"] {
+	width: 4.5rem;
+	min-height: var(--touch-target-min);
+	padding: var(--space-xs);
+	border-radius: var(--radius-md);
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-size: 1rem;
+}
+
+.qc-partial__reason {
+	flex: 1 1 8rem;
+	min-height: var(--touch-target-min);
+	padding: var(--space-xs) var(--space-sm);
+	border-radius: var(--radius-md);
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-size: 0.9rem;
+}
+
+/* Forces its own full-width line below the Passed/reason inputs (via
+   flex-basis: 100% in the wrapping .qc-partial row) instead of squeezing
+   onto their line - there isn't reliably enough card width for all three
+   on a touchscreen-sized card. */
+.qc-partial__submit {
+	flex: 1 1 100%;
+	min-height: var(--touch-target-min);
+	min-width: var(--touch-target-min);
+	background: var(--color-accent);
+	color: var(--color-bg);
+}
+
+/* START PRINT (queued) and PRINT FAILED (printing) each pair one short
+   text input with their own submit button - the same "small form" shape
+   as qc-partial above, just narrower (a single field, not two), so it
+   takes the full card width alongside any plain action button in the
+   same column. */
+.card-form {
+	flex: 1 1 100%;
+	display: flex;
+	gap: var(--space-xs);
+}
+
+.card-form__input {
+	flex: 1;
+	min-height: var(--touch-target-min);
+	padding: var(--space-xs) var(--space-sm);
+	border-radius: var(--radius-md);
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-size: 0.9rem;
+}
+
+.card-form .btn {
+	flex: 0 0 auto;
+}
+
+/* The queued-column quantity-edit control reuses .card-form's shape but
+   its input is a short number field, not a free-text one - keep it narrow
+   rather than stretching to fill the card like assigned_printer/reason do. */
+.card-form__input--qty {
+	flex: 0 0 5rem;
+	width: 5rem;
+}
+
+/* UPDATE QTY is a secondary action next to START PRINT - same touch target,
+   but visually quieter (outlined, not filled) so it doesn't compete with
+   the column's primary action. */
+.btn--secondary {
+	background: transparent;
+	border-color: var(--color-border);
+	color: var(--color-text);
+}
+
+/* CANCEL is available on every non-terminal card (see cardActions) as a
+   tertiary action - deliberately smaller and pushed to the far edge of the
+   action row (margin-left: auto) so it reads as "the one you have to mean
+   to tap" rather than competing with the column's primary action or with
+   PRINT FAILED/RE-PRINT's danger styling. It still uses the danger color
+   (this really does remove the item from the board for good) but as an
+   outline rather than a filled button, so operators don't mistake "this
+   failed and needs redoing" (filled danger) for "this is gone for good"
+   (outlined danger). */
+.card__actions .btn--cancel {
+	flex: 0 0 auto;
+	margin-left: auto;
+	min-height: var(--touch-target-min);
+	padding: 0 var(--space-sm);
+	font-size: 0.8rem;
+	background: transparent;
+	border-color: var(--color-danger);
+	color: var(--color-danger);
 }

@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -16,7 +17,7 @@ func Open() (*sql.DB, error) {
 // Reset drops every table in the configured schema, then runs every
 // migration back up from scratch.
 func Reset(db *sql.DB) error {
-	schema := dbSchema
+	schema := os.Getenv("DB_SCHEMA")
 	if schema == "" {
 		schema = "public"
 	}

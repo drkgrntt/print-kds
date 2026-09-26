@@ -44,6 +44,8 @@
 .field input,
 .item-row input {
 	min-height: var(--touch-target-min);
+	width: 100%;
+	min-width: 0;
 	padding: var(--space-sm);
 	border-radius: var(--radius-md);
 	border: 1px solid var(--color-border);
@@ -52,9 +54,13 @@
 	font-size: 1rem;
 }
 
+/* Quantity is 1-2 digits for the vast majority of orders - a fixed narrow
+   track reads better than a flexible share of the row, and (combined with
+   width: 100%/min-width: 0 above) keeps the input from overflowing past a
+   grid track that's narrower than its browser-default intrinsic width. */
 .item-row {
 	display: grid;
-	grid-template-columns: 3fr 2fr 1fr;
+	grid-template-columns: 3fr 2fr 4.5rem;
 	gap: var(--space-sm);
 	margin-bottom: var(--space-sm);
 }

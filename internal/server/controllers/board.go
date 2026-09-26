@@ -24,11 +24,13 @@ func NewBoardController(store *board.Store) *BoardController {
 
 func (b *BoardController) RegisterRoutes(app *fiber.App) {
 	app.Get("/", b.handleBoard)
-	app.Post("/print-items/:id/start", b.handleTransition(b.store.StartPrint))
+	app.Post("/print-items/:id/start", b.handleStartPrint)
 	app.Post("/print-items/:id/pop", b.handleTransition(b.store.PopOffBed))
-	app.Post("/print-items/:id/pass-qc", b.handleTransition(b.store.PassQC))
-	app.Post("/print-items/:id/reprint", b.handleTransition(b.store.RePrint))
+	app.Post("/print-items/:id/fail-print", b.handleFailPrint)
+	app.Post("/print-items/:id/qc-result", b.handleQCResult)
 	app.Post("/print-items/:id/generate-label", b.handleGenerateLabel)
+	app.Post("/print-items/:id/cancel", b.handleTransition(b.store.CancelItem))
+	app.Post("/print-items/:id/quantity", b.handleUpdateQuantity)
 }
 
 func (b *BoardController) handleBoard(c *fiber.Ctx) error {
@@ -46,8 +48,12 @@ type transitionFunc func(ctx context.Context, itemID int64) (board.PrintItem, er
 
 // handleTransition builds one htmx endpoint handler around a
 // board.Store transition method: parse :id, run the transition, then write
-// the delete+insert OOB swap pair (see writeOOBSwap). START PRINT, POP OFF
-// BED, PASS QC, and RE-PRINT all share this exact shape.
+// the delete+insert OOB swap pair (see writeOOBSwap). POP OFF BED and
+// CANCEL are the only board actions that fit this shape unmodified - START
+// PRINT (assigned_printer), PRINT FAILED (reason), PASS QC/RE-PRINT (extra
+// form fields and a possible split return value), GENERATE LABEL (an extra
+// *Shipment return value), and quantity edit (extra new_quantity field)
+// each need their own handler below instead.
 func (b *BoardController) handleTransition(fn transitionFunc) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		itemID, err := parseItemID(c)
@@ -62,6 +68,49 @@ func (b *BoardController) handleTransition(fn transitionFunc) fiber.Handler {
 
 		return writeOOBSwap(c, item)
 	}
+}
+
+// handleStartPrint isn't a transitionFunc (StartPrint takes an extra
+// assigned_printer form field) so it gets its own handler rather than
+// going through handleTransition. assigned_printer is free text and
+// optional - an empty value is passed through unvalidated (see the
+// "queued" case in components.cardActions for the mini-form that posts
+// here).
+func (b *BoardController) handleStartPrint(c *fiber.Ctx) error {
+	itemID, err := parseItemID(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	assignedPrinter := c.FormValue("assigned_printer")
+
+	item, err := b.store.StartPrint(c.Context(), itemID, assignedPrinter)
+	if err != nil {
+		return respondTransitionError(c, err)
+	}
+
+	return writeOOBSwap(c, item)
+}
+
+// handleFailPrint isn't a transitionFunc (FailPrint takes an extra reason
+// form field) so it gets its own handler rather than going through
+// handleTransition. This backs the "printing" column's PRINT FAILED
+// action, which sends the item straight back to queued instead of routing
+// it through cleaning/QC first - see board.Store.FailPrint.
+func (b *BoardController) handleFailPrint(c *fiber.Ctx) error {
+	itemID, err := parseItemID(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	reason := c.FormValue("reason")
+
+	item, err := b.store.FailPrint(c.Context(), itemID, reason)
+	if err != nil {
+		return respondTransitionError(c, err)
+	}
+
+	return writeOOBSwap(c, item)
 }
 
 // handleGenerateLabel isn't a transitionFunc (GenerateLabel also returns a
@@ -84,16 +133,85 @@ func (b *BoardController) handleGenerateLabel(c *fiber.Ctx) error {
 	return writeOOBSwap(c, item)
 }
 
+// handleQCResult isn't a transitionFunc (RecordQCResult takes extra form
+// fields and can return a second, brand-new split item) so it gets its own
+// handler rather than going through handleTransition. quantity_passed and
+// failure_reason come from the posted form - see the cleaning_qc case in
+// components.cardActions for the three shapes that hit this endpoint (full
+// pass, full reprint, and the partial-QC mini-form).
+func (b *BoardController) handleQCResult(c *fiber.Ctx) error {
+	itemID, err := parseItemID(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	quantityPassed, err := strconv.Atoi(c.FormValue("quantity_passed"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("invalid quantity_passed")
+	}
+	failureReason := c.FormValue("failure_reason")
+
+	item, split, err := b.store.RecordQCResult(c.Context(), itemID, quantityPassed, failureReason)
+	if err != nil {
+		if errors.Is(err, board.ErrInvalidQuantity) {
+			return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		}
+		return respondTransitionError(c, err)
+	}
+
+	c.Set("Content-Type", "text/html; charset=utf-8")
+	if err := components.DeleteOOB(item.ID).Render(c.Context(), c); err != nil {
+		return err
+	}
+	if err := components.InsertOOB(item.Status, item).Render(c.Context(), c); err != nil {
+		return err
+	}
+	if split != nil {
+		if err := components.InsertOOB(split.Status, *split).Render(c.Context(), c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// handleUpdateQuantity isn't a transitionFunc (UpdateQuantity takes an extra
+// new_quantity form field) so it gets its own handler rather than going
+// through handleTransition. Backs the "queued" column's inline
+// quantity-edit control (see components.cardActions) - a customer reducing
+// or increasing an order's quantity before printing has started.
+func (b *BoardController) handleUpdateQuantity(c *fiber.Ctx) error {
+	itemID, err := parseItemID(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	newQuantity, err := strconv.Atoi(c.FormValue("new_quantity"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("invalid new_quantity")
+	}
+
+	item, err := b.store.UpdateQuantity(c.Context(), itemID, newQuantity)
+	if err != nil {
+		if errors.Is(err, board.ErrInvalidQuantity) {
+			return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		}
+		return respondTransitionError(c, err)
+	}
+
+	return writeOOBSwap(c, item)
+}
+
 // writeOOBSwap writes the delete-old-card + insert-new-card OOB fragment
-// pair that moves item's card to its new column client-side. A packed item
-// drops off the live board entirely (see board.Store.BoardColumns), so
-// there's nothing to insert for that case - just the delete.
+// pair that moves item's card to its new column client-side. A packed or
+// cancelled item drops off the live board entirely (see
+// board.Store.BoardColumns), so there's nothing to insert for either case -
+// just the delete.
 func writeOOBSwap(c *fiber.Ctx, item board.PrintItem) error {
 	c.Set("Content-Type", "text/html; charset=utf-8")
 	if err := components.DeleteOOB(item.ID).Render(c.Context(), c); err != nil {
 		return err
 	}
-	if item.Status == "packed" {
+	if item.Status == "packed" || item.Status == "cancelled" {
 		return nil
 	}
 	return components.InsertOOB(item.Status, item).Render(c.Context(), c)

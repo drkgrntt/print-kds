@@ -31,25 +31,23 @@ type service struct {
 	db *sql.DB
 }
 
-var (
-	dbHost     = os.Getenv("DB_HOST")
-	dbPort     = os.Getenv("DB_PORT")
-	dbDatabase = os.Getenv("DB_DATABASE")
-	dbUsername = os.Getenv("DB_USERNAME")
-	dbPassword = os.Getenv("DB_PASSWORD")
-	dbSchema   = os.Getenv("DB_SCHEMA")
-	dbInstance *service
-)
+var dbInstance *service
 
+// connString reads DB_* from the environment at call time (rather than
+// into package vars at init time) so that anything which sets them late -
+// e.g. a test loading .env from a path relative to its own source file,
+// since godotenv/autoload's own init() only ever looks in the process's
+// starting working directory - still gets picked up correctly by New().
 func connString() string {
-	schema := dbSchema
+	schema := os.Getenv("DB_SCHEMA")
 	if schema == "" {
 		schema = "public"
 	}
 
 	return fmt.Sprintf(
 		"postgres://%s:%s@%s:%s/%s?sslmode=disable&search_path=%s",
-		dbUsername, dbPassword, dbHost, dbPort, dbDatabase, schema,
+		os.Getenv("DB_USERNAME"), os.Getenv("DB_PASSWORD"), os.Getenv("DB_HOST"),
+		os.Getenv("DB_PORT"), os.Getenv("DB_DATABASE"), schema,
 	)
 }
 
@@ -109,6 +107,6 @@ func (s *service) Health(ctx context.Context) map[string]string {
 
 // Close closes the database connection.
 func (s *service) Close() error {
-	logger.Info("disconnected from database", "database", dbDatabase)
+	logger.Info("disconnected from database", "database", os.Getenv("DB_DATABASE"))
 	return s.db.Close()
 }

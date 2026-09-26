@@ -25,13 +25,32 @@ Four columns, one per `print_items.status`:
 
 | Column | Status | Action |
 |---|---|---|
-| To Print | `queued` (sorted by order `due_date` ascending) | `START PRINT` → `printing` |
-| On Bed | `printing` | `POP OFF BED` → `cleaning_qc` |
-| Clean / QC | `cleaning_qc` | `PASS QC` → `ready_to_pack`, or `RE-PRINT` → `queued` |
-| Ready to Ship | `ready_to_pack` | `GENERATE LABEL` → `packed` (creates a `shipments` row) |
+| To Print | `queued` (reprinted items first, then by order `due_date` ascending) | `START PRINT` → `printing`, optionally recording which physical printer the item is going onto |
+| On Bed | `printing` | `POP OFF BED` → `cleaning_qc`, or `PRINT FAILED` → `queued` if the print itself fails mid-job (nozzle jam, filament runout, etc.) |
+| Clean / QC | `cleaning_qc` | `PASS QC` → `ready_to_pack`, or `RE-PRINT` → `queued`; a partial QC result splits the row, sending only the failed units back to `queued` while the rest ship |
+| Ready to Ship | `ready_to_pack` | `GENERATE LABEL` → `packed` (creates a `shipments` row for just that item, so an order can ship in pieces rather than waiting on every item to be ready at once) |
 
 Every action is a single htmx request; the board never does a full page
 reload.
+
+Any card still in flight (queued, on the bed, in cleaning/QC, or ready to
+ship) can also be `CANCEL`ed at any time, e.g. if a customer pulls an item
+or a whole order - a cancelled card drops off the board for good, the same
+way a packed one does. If every item on an order ends up cancelled or
+packed, the order itself is marked cancelled too (unless it's already
+shipped). A queued item's quantity can also be adjusted after the fact
+(e.g. "actually we only need 60, not 100") via a small inline quantity
+field next to `START PRINT` - only while it's still queued, since once
+printing starts the quantity-passed/partial-QC-split flow is how that gets
+tracked instead.
+
+A card that's been requeued after a QC failure or a mid-print failure
+(`reprint_count > 0`) jumps ahead of every not-yet-attempted item in "To
+Print", regardless of due date, and shows a "REPRINT (Nx)" badge so it's
+obvious why it's out of due-date order. Every card also shows how long
+it's been sitting in its current column (e.g. "In cleaning_qc: 12m"), so a
+backed-up stage is visible at a glance rather than invisible until an
+order's due date is already blown.
 
 ## Getting orders onto the board
 
@@ -47,8 +66,10 @@ only get onto the board by someone typing them in here.
 
 ## Schema
 
-Three tables — `orders`, `print_items` (FK → `orders`), `shipments`
-(FK → `orders`). See `docs/schema.md` for exact columns and constraints,
+Four tables — `orders`, `print_items` (FK → `orders`), `shipments`
+(FK → `orders`), and `shipment_items` (a join table linking `shipments` to
+the specific `print_items` that shipped on them, enabling partial
+shipments). See `docs/schema.md` for exact columns and constraints,
 `internal/database/migrations/` for the migrations themselves.
 
 ## Setup

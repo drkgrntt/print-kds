@@ -2,9 +2,26 @@ package components
 
 import (
 	"fmt"
+	"time"
 
 	"print-kds/internal/board"
 )
+
+// formatElapsed renders how long an item has been sitting in its current
+// column, for a shop-floor at-a-glance read: minutes under an hour, "Xh Ym"
+// beyond that. Not meant to be a general-purpose duration formatter - just
+// enough precision to spot a bottleneck (e.g. cleaning_qc backing up).
+func formatElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) - hours*60
+	return fmt.Sprintf("%dh %dm", hours, minutes)
+}
 
 // Card renders one print item's KDS tile.
 templ Card(item board.PrintItem) {
@@ -16,7 +33,14 @@ templ Card(item board.PrintItem) {
 		<h3 class="card__file">{ item.FileName }</h3>
 		<p class="card__meta">{ item.ColorMaterial }</p>
 		<p class="card__meta">{ item.CustomerName }</p>
+		if item.AssignedPrinter != "" {
+			<p class="card__meta">{ fmt.Sprintf("Printer: %s", item.AssignedPrinter) }</p>
+		}
+		if item.Status == "queued" && item.ReprintCount > 0 {
+			<p class="card__badge card__badge--reprint">{ fmt.Sprintf("REPRINT (%dx)", item.ReprintCount) }</p>
+		}
 		<p class="card__qty">{ fmt.Sprintf("%d / %d", item.QuantityCompleted, item.QuantityRequired) }</p>
+		<p class="card__elapsed">{ fmt.Sprintf("In %s: %s", item.Status, formatElapsed(time.Since(item.StatusChangedAt))) }</p>
 		<div class="card__actions">
 			@cardActions(item)
 		</div>
@@ -26,13 +50,51 @@ templ Card(item board.PrintItem) {
 templ cardActions(item board.PrintItem) {
 	switch item.Status {
 		case "queued":
-			<button class="btn btn--primary" hx-post={ fmt.Sprintf("/print-items/%d/start", item.ID) } hx-swap="none">[ START PRINT ]</button>
+			<form class="card-form" hx-post={ fmt.Sprintf("/print-items/%d/start", item.ID) } hx-swap="none">
+				<input class="card-form__input" type="text" name="assigned_printer" placeholder="printer (optional)"/>
+				<button type="submit" class="btn btn--primary">[ START PRINT ]</button>
+			</form>
+			<form class="card-form" hx-post={ fmt.Sprintf("/print-items/%d/quantity", item.ID) } hx-swap="none">
+				<input
+					class="card-form__input card-form__input--qty"
+					type="number"
+					name="new_quantity"
+					min="1"
+					value={ fmt.Sprintf("%d", item.QuantityRequired) }
+				/>
+				<button type="submit" class="btn btn--secondary">[ UPDATE QTY ]</button>
+			</form>
 		case "printing":
 			<button class="btn btn--primary" hx-post={ fmt.Sprintf("/print-items/%d/pop", item.ID) } hx-swap="none">[ POP OFF BED ]</button>
+			<form class="card-form" hx-post={ fmt.Sprintf("/print-items/%d/fail-print", item.ID) } hx-swap="none">
+				<input class="card-form__input" type="text" name="reason" placeholder="e.g. nozzle jam"/>
+				<button type="submit" class="btn btn--danger">[ PRINT FAILED ]</button>
+			</form>
 		case "cleaning_qc":
-			<button class="btn btn--primary" hx-post={ fmt.Sprintf("/print-items/%d/pass-qc", item.ID) } hx-swap="none">[ PASS QC ]</button>
-			<button class="btn btn--danger" hx-post={ fmt.Sprintf("/print-items/%d/reprint", item.ID) } hx-swap="none">[ RE-PRINT ]</button>
+			<form class="qc-fast" hx-post={ fmt.Sprintf("/print-items/%d/qc-result", item.ID) } hx-swap="none">
+				<input type="hidden" name="quantity_passed" value={ fmt.Sprintf("%d", item.QuantityRequired) }/>
+				<button type="submit" class="btn btn--primary">[ PASS QC ]</button>
+			</form>
+			<form class="qc-fast" hx-post={ fmt.Sprintf("/print-items/%d/qc-result", item.ID) } hx-swap="none">
+				<input type="hidden" name="quantity_passed" value="0"/>
+				<button type="submit" class="btn btn--danger">[ RE-PRINT ]</button>
+			</form>
+			<form class="qc-partial" hx-post={ fmt.Sprintf("/print-items/%d/qc-result", item.ID) } hx-swap="none">
+				<label class="qc-partial__field">
+					<span>Passed</span>
+					<input
+						type="number"
+						name="quantity_passed"
+						min="0"
+						max={ fmt.Sprintf("%d", item.QuantityRequired) }
+						value={ fmt.Sprintf("%d", item.QuantityRequired) }
+					/>
+				</label>
+				<input class="qc-partial__reason" type="text" name="failure_reason" placeholder="reason if any failed"/>
+				<button type="submit" class="btn qc-partial__submit">[ SUBMIT ]</button>
+			</form>
 		case "ready_to_pack":
 			<button class="btn btn--primary" hx-post={ fmt.Sprintf("/print-items/%d/generate-label", item.ID) } hx-swap="none">[ GENERATE LABEL ]</button>
 	}
+	<button class="btn btn--cancel" hx-post={ fmt.Sprintf("/print-items/%d/cancel", item.ID) } hx-swap="none">[ CANCEL ]</button>
 }
