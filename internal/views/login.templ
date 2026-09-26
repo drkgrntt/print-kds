@@ -1,0 +1,31 @@
+package views
+
+// LoginFormData is Login's input - Email is echoed back on a failed
+// attempt so retyping the password doesn't also mean retyping the email.
+type LoginFormData struct {
+	Email string
+	Error string
+}
+
+templ Login(data LoginFormData) {
+	@Layout("Log In - Print Shop KDS", LayoutData{}) {
+		<main class="intake">
+			<h1>Log In</h1>
+			if data.Error != "" {
+				<p class="banner banner--error">{ data.Error }</p>
+			}
+			<form method="post" action="/login" class="order-form">
+				<label class="field">
+					<span>Email</span>
+					<input type="email" name="email" value={ data.Email } required autofocus/>
+				</label>
+				<label class="field">
+					<span>Password</span>
+					<input type="password" name="password" required/>
+				</label>
+				<button type="submit" class="btn btn--primary">Log In</button>
+			</form>
+			<p><a href="/signup">Set up a new shop</a></p>
+		</main>
+	}
+}

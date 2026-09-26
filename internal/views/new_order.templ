@@ -21,8 +21,8 @@ type NewOrderFormData struct {
 	CreatedOrderNumber string
 }
 
-templ NewOrderForm(data NewOrderFormData) {
-	@Layout("New Order - Print Shop KDS") {
+templ NewOrderForm(data NewOrderFormData, layout LayoutData) {
+	@Layout("New Order - Print Shop KDS", layout) {
 		<main class="intake">
 			<h1>New Order</h1>
 			if data.CreatedOrderNumber != "" {

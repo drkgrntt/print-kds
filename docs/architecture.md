@@ -13,12 +13,83 @@ Every request passes through Fiber middleware registered in
    with the request id/method/path/stack, and responds `500` instead of
    taking the process down. Registered right after `RequestID` so its own
    log line can still tag the request that panicked.
-3. Static file serving (`/static` → `web/static`), then the registered
-   controllers.
+3. Static file serving (`/static` → `web/static`), then the public auth
+   routes (`/login`, `/signup`, `/logout` - see `controllers.AuthController`),
+   then `middleware.RequireAuth`, then every remaining controller.
 
-There's no auth middleware in this chain — deliberately. This is a single
-shared shop-floor display, not a multi-tenant app; anyone who can reach the
-board can use it.
+## Auth: sessions, tenants, and roles
+
+Every route except `/static/*`, `/health`, and the auth routes themselves
+requires a valid session - `middleware.RequireAuth` (registered once in
+`routes.go`, ahead of `BoardController`/`NewOrderController`/
+`UsersController`) reads the `pkds_session` cookie, hashes it, and looks it
+up via `auth.Store.ValidateSession` (a join across `sessions` → `users` →
+`tenants`, so tenant name and role are always current, not stale from
+whenever the session was created). On success it stashes `tenant_id`,
+`user_id`, `tenant_name`, and `role` on the request's Fiber `Locals`,
+read back via `middleware.CurrentTenantID`/`CurrentUserID`/
+`CurrentTenantName`/`CurrentRole`/`IsAdmin`. On failure it redirects to
+`/login` - except for an htmx request (`HX-Request: true`), where a plain
+redirect wouldn't compose with the board's `hx-swap="none"` + OOB-fragment
+responses, so it sets `HX-Redirect: /login` and returns `200` instead;
+htmx follows that as a full-page navigation client-side. See
+`internal/server/middleware/auth.go`.
+
+`middleware.RequireAdmin` gates the two admin-only areas -
+`NewOrderController` (order intake) and `UsersController`
+(`/admin/users`) each apply it directly to their own routes, right after
+`RequireAuth` in the chain - a `staff` user gets a `403`. Every other
+route (the board itself, every print-item transition) is open to any
+logged-in user regardless of role.
+
+`/login` and `/signup` (`controllers.AuthController`) are the only public,
+unauthenticated routes besides static/health. `/signup` creates a
+brand-new tenant plus its first user (always `role = admin` - the shop
+owner) in one transaction (`auth.Store.SignUp`); there's no flow for
+attaching a login to an *existing* tenant from the web UI - that's what
+`cmd/createuser` is for (see below). Both routes set the session cookie
+the same way (`AuthController.startSession`): `HttpOnly`, `SameSite=Lax`,
+`Path=/`, expiring with the session row (`auth.Store.CreateSession`'s
+fixed 30-day TTL, no sliding refresh). `Secure` is hardcoded `false` -
+this app is meant to run self-hosted, often without TLS in front of it;
+flip it to `true` if this ever runs behind a TLS-terminating reverse
+proxy.
+
+### Tenant isolation in `board.Store`
+
+The middleware above only resolves *who's asking*; the actual isolation
+boundary is in `internal/board.Store` itself. Every `Store` method takes a
+`tenantID int64`:
+
+- `BoardColumns` and `CreateOrder` filter/insert on `orders.tenant_id`
+  directly.
+- Every item-transition method (`StartPrint`, `PopOffBed`, `FailPrint`,
+  `RecordQCResult`, `GenerateLabel`, `CancelItem`, `UpdateQuantity`) goes
+  through `beginItemTx`/`beginItemTxAny`, whose `FOR UPDATE` lock query
+  now includes `AND o.tenant_id = $2` alongside the `pi.id = $1` lookup.
+  `print_items`/`shipments`/`shipment_items` don't carry their own
+  `tenant_id` column - every query that touches them already joins
+  `orders` (see `itemColumns`), so scoping through that join is enough;
+  the state machine and OOB-swap mechanism below are unchanged by any of
+  this.
+
+A cross-tenant item id (someone on shop A's session tapping a shop B item
+id, e.g. by guessing) hits `sql.ErrNoRows` inside that lock query, wrapped
+into the same `ErrNotFound` a nonexistent id would produce - the two cases
+are indistinguishable by design.
+
+### Bootstrapping a tenant's first login
+
+`cmd/createuser` (`go run ./cmd/createuser -tenant "Shop Name" -email ...
+-password ... -role admin`) looks up (or creates) a tenant by name and
+adds a user to it via `auth.Store.CreateUser` - the same admin-driven path
+`UsersController` uses, just from the command line. This exists because
+the `00011_add_tenant_id_to_orders.sql` migration backfills every
+pre-existing order onto a "Default Shop" tenant that has data but no user
+who can log into it; `cmd/createuser` is how that shop gets its first
+login. `cmd/dbseed` provisions its own seed tenant/login the same way (see
+its doc comment) so `make seed` stays a one-command path to a clickable,
+logged-in board.
 
 ## The board's status state machine
 
@@ -191,6 +262,37 @@ enough to catch this class of bug, since the raw HTML the server returns
 looks correct either way; it's what htmx's client-side OOB algorithm does
 with that HTML that breaks.
 
+## Audit trail: who touched a card
+
+Every `board.Store` transition method (`StartPrint`, `PopOffBed`,
+`FailPrint`, `RecordQCResult`, `GenerateLabel`, `CancelItem`,
+`UpdateQuantity`) — and `CreateOrder`, for a fresh item's creation — stamps
+`print_items.last_updated_by` with the acting user's id (from
+`middleware.CurrentUserID(c)`, threaded through as `userID` the same way
+`tenantID` is) and appends one row to `print_item_events` inside its
+existing transaction, via the private `recordEvent` helper. A card's
+`Last: <email>` line and its `[ HISTORY ]` panel are just reads of that:
+`PrintItem.LastUpdatedByEmail` comes from a `LEFT JOIN users` alongside the
+existing `orders` join in every `itemColumns`-based query, and
+`board.Store.ItemHistory` reads the full `print_item_events` log for one
+item, tenant-scoped the same way `beginItemTxAny` is.
+
+`GET /print-items/:id/history` (`handleItemHistory`) is the first
+read-only htmx fragment in the app, and it doesn't follow the OOB pattern
+above: it's a plain `hx-get` (from the card's `[ HISTORY ]` button) swapped
+via ordinary `hx-target`/`hx-swap="innerHTML"` into a `<div>` already
+sitting inside the card, because it never moves the card between columns
+the way every other endpoint here does — there's nothing to delete-and-
+reinsert.
+
+`UpdateQuantity` doesn't change status, so its event has
+`from_status == to_status` (whatever the item's current status already
+is) — the log records "who edited the records," not just "who moved the
+card." `RecordQCResult`'s partial-failure split also gets its own creation
+event on the new sibling row, so a card that appears mid-board (not from
+intake) still explains itself in its own history rather than looking like
+it came from nowhere.
+
 ## Manual order intake
 
 `/admin/new-order` (`controllers.NewOrderController`) is the only way an
@@ -239,14 +341,19 @@ form for this - see `internal/views/components/card.templ`.
 ## Layout
 
 - `cmd/api` — the server entrypoint. `cmd/dbreset`/`cmd/dbseed` are dev CLI
-  tools (see Makefile).
+  tools (see Makefile); `cmd/createuser` provisions a login onto an
+  existing tenant (see "Bootstrapping a tenant's first login" above).
 - `internal/board` — the domain layer: `Store` wraps every board query and
   status-transition method (`BoardColumns`, `StartPrint`, `PopOffBed`,
   `FailPrint`, `RecordQCResult`, `GenerateLabel`, `CancelItem`) plus
   `CreateOrder` for manual intake and `UpdateQuantity` for a queued item's
-  same-status quantity edit. Each transition method opens its own
-  transaction and `SELECT ... FOR UPDATE`-locks the item row first, so two
-  taps on the same card from two tablets serialize instead of racing.
+  same-status quantity edit - every one of these takes a `tenantID` (see
+  "Tenant isolation in board.Store" above). Each transition method opens
+  its own transaction and `SELECT ... FOR UPDATE`-locks the item row
+  first, so two taps on the same card from two tablets serialize instead
+  of racing.
+- `internal/auth` — tenants/users/sessions (see "Auth: sessions, tenants,
+  and roles" above).
 - `internal/database` — connection setup + goose migrations, embedded from
   `internal/database/migrations/*.sql`, applied automatically on startup
   (`database.New()` calls `migrate()` — no separate migrate step).
@@ -254,7 +361,8 @@ form for this - see `internal/views/components/card.templ`.
 - `internal/server` — Fiber wiring: `server.go` (dependency construction),
   `routes.go` (middleware + route registration), `controllers/` (one file
   per page/feature, `render.go`'s `render()` helper writes a templ
-  component as the response body), `middleware/`.
+  component as the response body), `middleware/` (`RequestID`, `Recover`,
+  `RequireAuth`/`RequireAdmin`).
 - `internal/views` (+ `internal/views/components` for cross-page pieces) —
   `.templ` source, compiled to `_templ.go` by `templ generate` (gitignored
   build output — `make run`/`build`/`watch` all regenerate first; don't

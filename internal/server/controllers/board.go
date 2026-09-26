@@ -8,6 +8,7 @@ import (
 
 	"print-kds/internal/board"
 	"print-kds/internal/logger"
+	"print-kds/internal/server/middleware"
 	"print-kds/internal/views"
 	"print-kds/internal/views/components"
 
@@ -31,20 +32,23 @@ func (b *BoardController) RegisterRoutes(app *fiber.App) {
 	app.Post("/print-items/:id/generate-label", b.handleGenerateLabel)
 	app.Post("/print-items/:id/cancel", b.handleTransition(b.store.CancelItem))
 	app.Post("/print-items/:id/quantity", b.handleUpdateQuantity)
+	app.Get("/print-items/:id/history", b.handleItemHistory)
 }
 
 func (b *BoardController) handleBoard(c *fiber.Ctx) error {
-	columns, err := b.store.BoardColumns(c.Context())
+	tenantID := middleware.CurrentTenantID(c)
+	columns, err := b.store.BoardColumns(c.Context(), tenantID)
 	if err != nil {
 		logger.Error("load board columns", "error", err)
 		return c.Status(fiber.StatusInternalServerError).SendString("failed to load board")
 	}
-	return render(c, views.Board(columns))
+	layout := views.LayoutData{TenantName: middleware.CurrentTenantName(c), IsAdmin: middleware.IsAdmin(c)}
+	return render(c, views.Board(columns, layout))
 }
 
 // transitionFunc matches every board.Store status-transition method except
 // GenerateLabel (which also returns a *Shipment - see handleGenerateLabel).
-type transitionFunc func(ctx context.Context, itemID int64) (board.PrintItem, error)
+type transitionFunc func(ctx context.Context, tenantID, userID, itemID int64) (board.PrintItem, error)
 
 // handleTransition builds one htmx endpoint handler around a
 // board.Store transition method: parse :id, run the transition, then write
@@ -61,7 +65,7 @@ func (b *BoardController) handleTransition(fn transitionFunc) fiber.Handler {
 			return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 		}
 
-		item, err := fn(c.Context(), itemID)
+		item, err := fn(c.Context(), middleware.CurrentTenantID(c), middleware.CurrentUserID(c), itemID)
 		if err != nil {
 			return respondTransitionError(c, err)
 		}
@@ -84,7 +88,7 @@ func (b *BoardController) handleStartPrint(c *fiber.Ctx) error {
 
 	assignedPrinter := c.FormValue("assigned_printer")
 
-	item, err := b.store.StartPrint(c.Context(), itemID, assignedPrinter)
+	item, err := b.store.StartPrint(c.Context(), middleware.CurrentTenantID(c), middleware.CurrentUserID(c), itemID, assignedPrinter)
 	if err != nil {
 		return respondTransitionError(c, err)
 	}
@@ -105,7 +109,7 @@ func (b *BoardController) handleFailPrint(c *fiber.Ctx) error {
 
 	reason := c.FormValue("reason")
 
-	item, err := b.store.FailPrint(c.Context(), itemID, reason)
+	item, err := b.store.FailPrint(c.Context(), middleware.CurrentTenantID(c), middleware.CurrentUserID(c), itemID, reason)
 	if err != nil {
 		return respondTransitionError(c, err)
 	}
@@ -125,7 +129,7 @@ func (b *BoardController) handleGenerateLabel(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 
-	item, _, err := b.store.GenerateLabel(c.Context(), itemID)
+	item, _, err := b.store.GenerateLabel(c.Context(), middleware.CurrentTenantID(c), middleware.CurrentUserID(c), itemID)
 	if err != nil {
 		return respondTransitionError(c, err)
 	}
@@ -151,7 +155,7 @@ func (b *BoardController) handleQCResult(c *fiber.Ctx) error {
 	}
 	failureReason := c.FormValue("failure_reason")
 
-	item, split, err := b.store.RecordQCResult(c.Context(), itemID, quantityPassed, failureReason)
+	item, split, err := b.store.RecordQCResult(c.Context(), middleware.CurrentTenantID(c), middleware.CurrentUserID(c), itemID, quantityPassed, failureReason)
 	if err != nil {
 		if errors.Is(err, board.ErrInvalidQuantity) {
 			return c.Status(fiber.StatusBadRequest).SendString(err.Error())
@@ -190,7 +194,7 @@ func (b *BoardController) handleUpdateQuantity(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("invalid new_quantity")
 	}
 
-	item, err := b.store.UpdateQuantity(c.Context(), itemID, newQuantity)
+	item, err := b.store.UpdateQuantity(c.Context(), middleware.CurrentTenantID(c), middleware.CurrentUserID(c), itemID, newQuantity)
 	if err != nil {
 		if errors.Is(err, board.ErrInvalidQuantity) {
 			return c.Status(fiber.StatusBadRequest).SendString(err.Error())
@@ -199,6 +203,27 @@ func (b *BoardController) handleUpdateQuantity(c *fiber.Ctx) error {
 	}
 
 	return writeOOBSwap(c, item)
+}
+
+// handleItemHistory backs the card's [ HISTORY ] toggle: a plain htmx GET
+// swapped into a target div inside the card (hx-swap="innerHTML"), not an
+// OOB swap - it's the first read-only htmx fragment in the app, since it
+// doesn't move the card between columns the way every other endpoint here
+// does. No RequireAdmin: any logged-in user can view an item's history,
+// same as the board itself.
+func (b *BoardController) handleItemHistory(c *fiber.Ctx) error {
+	itemID, err := parseItemID(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	events, err := b.store.ItemHistory(c.Context(), middleware.CurrentTenantID(c), itemID)
+	if err != nil {
+		logger.Error("load item history", "error", err)
+		return c.Status(fiber.StatusInternalServerError).SendString("failed to load history")
+	}
+
+	return render(c, components.HistoryList(events))
 }
 
 // writeOOBSwap writes the delete-old-card + insert-new-card OOB fragment

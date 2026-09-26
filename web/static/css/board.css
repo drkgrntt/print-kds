@@ -94,6 +94,35 @@
 	letter-spacing: 0.03em;
 }
 
+.card__last-updated {
+	font-style: italic;
+}
+
+.card__history-toggle {
+	flex: none;
+	align-self: flex-start;
+}
+
+.card__history {
+	font-size: 0.85rem;
+	color: var(--color-text-muted);
+}
+
+.card__history-list {
+	list-style: none;
+	margin: var(--space-xs) 0 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 0.2em;
+}
+
+.card__history-item {
+	display: flex;
+	gap: var(--space-xs);
+	flex-wrap: wrap;
+}
+
 .card__actions {
 	display: flex;
 	flex-wrap: wrap;

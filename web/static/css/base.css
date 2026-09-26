@@ -58,6 +58,18 @@ a {
 	color: var(--color-text);
 }
 
+.app-bar__actions {
+	display: flex;
+	align-items: center;
+	gap: var(--space-sm);
+}
+
+.app-bar__tenant {
+	color: var(--color-text-muted);
+	font-weight: 700;
+	padding: 0 var(--space-sm);
+}
+
 .app-bar__link {
 	min-height: var(--touch-target-min);
 	display: flex;
@@ -68,6 +80,23 @@ a {
 	color: var(--color-bg);
 	font-weight: 700;
 	text-decoration: none;
+}
+
+.app-bar__logout-form {
+	display: flex;
+}
+
+.app-bar__link-button {
+	min-height: var(--touch-target-min);
+	display: flex;
+	align-items: center;
+	padding: 0 var(--space-md);
+	border-radius: var(--radius-md);
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-weight: 700;
+	font-size: 1rem;
 }
 
 /* Real touch targets, not just clickable text - this is tapped on a

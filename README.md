@@ -2,8 +2,9 @@
 
 A self-hosted Kitchen Display System (KDS) for a 3D print shop floor — a
 shared board, meant to run full-screen on a touchscreen or tablet in the
-print room, that tracks each print item from queue to shipment. There's no
-login and no multi-tenancy: one shop, one board, one shared display.
+print room, that tracks each print item from queue to shipment.
+print-kds is multi-tenant: one shared instance/database can serve many
+shops, each logged in and seeing only its own board and orders.
 
 ## Tech stack
 
@@ -52,6 +53,20 @@ it's been sitting in its current column (e.g. "In cleaning_qc: 12m"), so a
 backed-up stage is visible at a glance rather than invisible until an
 order's due date is already blown.
 
+Every card also shows who last touched it ("Last: <email>"), and a
+`[ HISTORY ]` toggle expands its full audit trail - every status
+transition (and its creation), each with who did it and when.
+
+## Users & roles
+
+Each shop ("tenant") logs in separately at `/login` - `/signup` creates a
+brand-new shop and its first user in one step. There are two roles:
+`admin` (order intake at `/admin/new-order` and user management at
+`/admin/users`) and `staff` (can operate the board itself - every
+print-item transition - but not create orders or manage users). An admin
+can add teammates from `/admin/users`. See `docs/architecture.md` for how
+the session cookie ties a request to its tenant.
+
 ## Getting orders onto the board
 
 `/admin/new-order` is a manual entry form — order number, customer name,
@@ -66,10 +81,13 @@ only get onto the board by someone typing them in here.
 
 ## Schema
 
-Four tables — `orders`, `print_items` (FK → `orders`), `shipments`
-(FK → `orders`), and `shipment_items` (a join table linking `shipments` to
-the specific `print_items` that shipped on them, enabling partial
-shipments). See `docs/schema.md` for exact columns and constraints,
+Eight tables — `tenants`, `users` (FK → `tenants`), `sessions`
+(FK → `users`/`tenants`), `orders` (FK → `tenants`), `print_items`
+(FK → `orders`), `shipments` (FK → `orders`), `shipment_items` (a join
+table linking `shipments` to the specific `print_items` that shipped on
+them, enabling partial shipments), and `print_item_events` (an append-only
+audit log of every print item's status transitions, who ran each one, and
+when). See `docs/schema.md` for exact columns and constraints,
 `internal/database/migrations/` for the migrations themselves.
 
 ## Setup
@@ -86,9 +104,11 @@ automatically before serving:
 make run
 ```
 
-To see cards on the board right away instead of starting from an empty
-one, either use `/admin/new-order` (see above) or run `make seed`, which
-populates a few sample orders/items spread across every column.
+Visit `/signup` to create your shop and its first (admin) login. To see
+cards on the board right away instead of starting from an empty one, run
+`make seed` instead, which also provisions a sample shop/login (printed to
+the console when it finishes) alongside a few sample orders/items spread
+across every column.
 
 ## Development workflow
 

@@ -41,7 +41,21 @@
 	font-size: 0.9rem;
 }
 
+.users-table {
+	width: 100%;
+	border-collapse: collapse;
+	margin-bottom: var(--space-lg);
+}
+
+.users-table th,
+.users-table td {
+	text-align: left;
+	padding: var(--space-sm);
+	border-bottom: 1px solid var(--color-border);
+}
+
 .field input,
+.field select,
 .item-row input {
 	min-height: var(--touch-target-min);
 	width: 100%;

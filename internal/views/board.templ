@@ -5,8 +5,8 @@ import (
 	"print-kds/internal/views/components"
 )
 
-templ Board(columns map[string][]board.PrintItem) {
-	@Layout("Print Shop KDS") {
+templ Board(columns map[string][]board.PrintItem, layout LayoutData) {
+	@Layout("Print Shop KDS", layout) {
 		<main class="board">
 			@boardColumn("queued", "To Print", columns["queued"])
 			@boardColumn("printing", "On Bed", columns["printing"])

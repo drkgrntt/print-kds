@@ -9,6 +9,7 @@ import (
 
 	"print-kds/internal/board"
 	"print-kds/internal/logger"
+	"print-kds/internal/server/middleware"
 	"print-kds/internal/views"
 
 	"github.com/gofiber/fiber/v2"
@@ -32,10 +33,14 @@ func NewNewOrderController(store *board.Store) *NewOrderController {
 	return &NewOrderController{store: store}
 }
 
+// RegisterRoutes registers each route with middleware.RequireAdmin ahead
+// of its handler - it runs after routes.go's RequireAuth, so order intake
+// is restricted to admins while the board itself (registered separately)
+// stays open to any logged-in user.
 func (n *NewOrderController) RegisterRoutes(app *fiber.App) {
-	app.Get("/admin/new-order", n.handleForm)
-	app.Post("/admin/new-order", n.handleCreate)
-	app.Get("/admin/new-order/item-row", n.handleItemRow)
+	app.Get("/admin/new-order", middleware.RequireAdmin, n.handleForm)
+	app.Post("/admin/new-order", middleware.RequireAdmin, n.handleCreate)
+	app.Get("/admin/new-order/item-row", middleware.RequireAdmin, n.handleItemRow)
 }
 
 func (n *NewOrderController) handleForm(c *fiber.Ctx) error {
@@ -43,7 +48,8 @@ func (n *NewOrderController) handleForm(c *fiber.Ctx) error {
 		Items:              blankItemRows(minItemRows),
 		CreatedOrderNumber: c.Query("created"),
 	}
-	return render(c, views.NewOrderForm(data))
+	layout := views.LayoutData{TenantName: middleware.CurrentTenantName(c), IsAdmin: middleware.IsAdmin(c)}
+	return render(c, views.NewOrderForm(data, layout))
 }
 
 // handleItemRow serves the "+ Add another item" button's htmx request: one
@@ -57,17 +63,18 @@ func (n *NewOrderController) handleItemRow(c *fiber.Ctx) error {
 
 func (n *NewOrderController) handleCreate(c *fiber.Ctx) error {
 	form := parseNewOrderForm(c)
+	layout := views.LayoutData{TenantName: middleware.CurrentTenantName(c), IsAdmin: middleware.IsAdmin(c)}
 
 	if msg := form.validate(); msg != "" {
-		return render(c, views.NewOrderForm(form.toFormData(msg)))
+		return render(c, views.NewOrderForm(form.toFormData(msg), layout))
 	}
 
-	if _, err := n.store.CreateOrder(c.Context(), form.toNewOrder()); err != nil {
+	if _, err := n.store.CreateOrder(c.Context(), middleware.CurrentTenantID(c), middleware.CurrentUserID(c), form.toNewOrder()); err != nil {
 		if errors.Is(err, board.ErrDuplicateOrderNumber) {
-			return render(c, views.NewOrderForm(form.toFormData(fmt.Sprintf("Order number %q already exists - pick a different one.", form.OrderNumber))))
+			return render(c, views.NewOrderForm(form.toFormData(fmt.Sprintf("Order number %q already exists - pick a different one.", form.OrderNumber)), layout))
 		}
 		logger.Error("create order", "error", err)
-		return render(c, views.NewOrderForm(form.toFormData("Something went wrong saving this order - try again.")))
+		return render(c, views.NewOrderForm(form.toFormData("Something went wrong saving this order - try again."), layout))
 	}
 
 	return c.Redirect(fmt.Sprintf("/admin/new-order?created=%s", form.OrderNumber), fiber.StatusSeeOther)

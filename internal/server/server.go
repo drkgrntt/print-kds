@@ -1,6 +1,7 @@
 package server
 
 import (
+	"print-kds/internal/auth"
 	"print-kds/internal/board"
 	"print-kds/internal/database"
 
@@ -12,6 +13,7 @@ type FiberServer struct {
 
 	db         database.Service
 	boardStore *board.Store
+	authStore  *auth.Store
 }
 
 func New() *FiberServer {
@@ -25,6 +27,7 @@ func New() *FiberServer {
 
 		db:         db,
 		boardStore: board.NewStore(db.DB()),
+		authStore:  auth.NewStore(db.DB()),
 	}
 
 	return server

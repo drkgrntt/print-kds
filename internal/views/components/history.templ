@@ -1,0 +1,37 @@
+package components
+
+import (
+	"fmt"
+
+	"print-kds/internal/board"
+)
+
+// historyLabel renders one print_item_events row as "created" (a fresh
+// item or a QC-failure split, see board.Store.RecordQCResult) or
+// "from -> to", appending detail's free-form context when present.
+func historyLabel(e board.PrintItemEvent) string {
+	label := "created"
+	if e.FromStatus != "" {
+		label = fmt.Sprintf("%s -> %s", e.FromStatus, e.ToStatus)
+	}
+	if e.Detail != "" {
+		label = fmt.Sprintf("%s: %s", label, e.Detail)
+	}
+	return label
+}
+
+// HistoryList renders an item's full audit trail - the fragment swapped
+// into a card's [ HISTORY ] toggle (see components.Card).
+templ HistoryList(events []board.PrintItemEvent) {
+	<ul class="card__history-list">
+		for _, e := range events {
+			<li class="card__history-item">
+				<span class="card__history-time">{ e.CreatedAt.Format("Jan 2 3:04pm") }</span>
+				<span class="card__history-change">{ historyLabel(e) }</span>
+				if e.UserEmail != "" {
+					<span class="card__history-user">{ emailLocalPart(e.UserEmail) }</span>
+				}
+			</li>
+		}
+	</ul>
+}

@@ -7,9 +7,10 @@
 //
 //	go run ./cmd/dbseed
 //
-// Safe to re-run: orders are keyed by their unique order_number, so a
-// repeat run skips any order that's already there (and its items) rather
-// than duplicating cards on the board.
+// Safe to re-run: the seed tenant/user are idempotent inserts, and orders
+// are keyed by (tenant_id, order_number), so a repeat run skips any order
+// that's already there (and its items) rather than duplicating cards on
+// the board.
 package main
 
 import (
@@ -20,7 +21,18 @@ import (
 	"print-kds/internal/database"
 	"print-kds/internal/logger"
 
+	"golang.org/x/crypto/bcrypt"
+
 	_ "github.com/joho/godotenv/autoload"
+)
+
+// seedTenantName/seedUserEmail/seedUserPassword are the dev login dbseed
+// provisions - printed at the end of a run so `go run ./cmd/dbseed` stays
+// a one-command path to a clickable, logged-in board.
+const (
+	seedTenantName   = "Seed Shop"
+	seedUserEmail    = "dev@example.com"
+	seedUserPassword = "dev-password-123"
 )
 
 type seedItem struct {
@@ -81,9 +93,18 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	tenantID, err := ensureSeedTenant(ctx, db)
+	if err != nil {
+		logger.Fatal("ensure seed tenant", "error", err)
+	}
+	if err := ensureSeedUser(ctx, db, tenantID); err != nil {
+		logger.Fatal("ensure seed user", "error", err)
+	}
+
 	applied, skipped := 0, 0
 	for _, o := range seedOrders {
-		created, err := seedOneOrder(ctx, db, o)
+		created, err := seedOneOrder(ctx, db, tenantID, o)
 		if err != nil {
 			logger.Fatal("seed order", "order_number", o.orderNumber, "error", err)
 		}
@@ -97,15 +118,64 @@ func main() {
 	}
 
 	fmt.Printf("\nSeeding complete: %d order(s) created, %d already existed.\n", applied, skipped)
+	fmt.Printf("Log in at / with %s / %s\n", seedUserEmail, seedUserPassword)
+}
+
+// ensureSeedTenant looks up (or creates) the "Seed Shop" tenant dbseed's
+// orders/user hang off of, so a repeat run reuses the same tenant instead
+// of spawning a new one every time.
+func ensureSeedTenant(ctx context.Context, db *sql.DB) (int64, error) {
+	var id int64
+	err := db.QueryRowContext(ctx, `SELECT id FROM tenants WHERE name = $1`, seedTenantName).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, fmt.Errorf("look up seed tenant: %w", err)
+	}
+
+	if err := db.QueryRowContext(ctx,
+		`INSERT INTO tenants (name) VALUES ($1) RETURNING id`, seedTenantName,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("insert seed tenant: %w", err)
+	}
+	return id, nil
+}
+
+// ensureSeedUser idempotently provisions the dev login - hashed inline
+// with bcrypt rather than going through internal/auth.Store, matching
+// this command's existing no-Store, raw-SQL style (see seedOneOrder).
+// It's a fixed, published dev credential, not a security-sensitive one.
+func ensureSeedUser(ctx context.Context, db *sql.DB, tenantID int64) error {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)`, seedUserEmail).Scan(&exists); err != nil {
+		return fmt.Errorf("check seed user: %w", err)
+	}
+	if exists {
+		return nil
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(seedUserPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash seed user password: %w", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO users (tenant_id, email, password_hash, role)
+		VALUES ($1, $2, $3, 'admin')
+	`, tenantID, seedUserEmail, string(hash)); err != nil {
+		return fmt.Errorf("insert seed user: %w", err)
+	}
+	return nil
 }
 
 // seedOneOrder inserts o and its items in a single transaction, unless an
-// order with the same order_number already exists (ON CONFLICT DO
-// NOTHING), in which case it skips the whole order - including its items,
-// since re-seeding items onto an order a previous run already seeded (and
-// whatever workflow progress happened to it since) would just duplicate
-// cards on the board.
-func seedOneOrder(ctx context.Context, db *sql.DB, o seedOrder) (created bool, err error) {
+// order with the same (tenant_id, order_number) already exists (ON
+// CONFLICT DO NOTHING), in which case it skips the whole order - including
+// its items, since re-seeding items onto an order a previous run already
+// seeded (and whatever workflow progress happened to it since) would just
+// duplicate cards on the board.
+func seedOneOrder(ctx context.Context, db *sql.DB, tenantID int64, o seedOrder) (created bool, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin transaction: %w", err)
@@ -114,11 +184,11 @@ func seedOneOrder(ctx context.Context, db *sql.DB, o seedOrder) (created bool, e
 
 	var orderID int64
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO orders (order_number, customer_name, shipping_address, due_date, status)
-		VALUES ($1, $2, '{}', CURRENT_DATE + $3::int, 'pending')
-		ON CONFLICT (order_number) DO NOTHING
+		INSERT INTO orders (tenant_id, order_number, customer_name, shipping_address, due_date, status)
+		VALUES ($1, $2, $3, '{}', CURRENT_DATE + $4::int, 'pending')
+		ON CONFLICT (tenant_id, order_number) DO NOTHING
 		RETURNING id
-	`, o.orderNumber, o.customerName, o.dueInDays).Scan(&orderID)
+	`, tenantID, o.orderNumber, o.customerName, o.dueInDays).Scan(&orderID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

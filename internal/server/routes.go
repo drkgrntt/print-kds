@@ -16,8 +16,18 @@ func (s *FiberServer) RegisterFiberRoutes() {
 	s.App.Static("/static", "./web/static")
 
 	controllers.NewHealthController(s.db).RegisterRoutes(s.App)
+	// Auth routes (login/signup/logout) are public - registered before
+	// RequireAuth below so they're reachable without a session.
+	controllers.NewAuthController(s.authStore).RegisterRoutes(s.App)
+
+	s.App.Use(middleware.RequireAuth(s.authStore))
+
 	controllers.NewBoardController(s.boardStore).RegisterRoutes(s.App)
+	// NewOrderController and UsersController each gate their own routes
+	// with middleware.RequireAdmin - order intake and user management are
+	// admin-only, the board itself is open to any logged-in user.
 	controllers.NewNewOrderController(s.boardStore).RegisterRoutes(s.App)
+	controllers.NewUsersController(s.authStore).RegisterRoutes(s.App)
 
 	logger.Info("routes registered")
 }

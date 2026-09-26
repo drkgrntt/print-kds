@@ -1,0 +1,70 @@
+package views
+
+import (
+	"print-kds/internal/auth"
+	"fmt"
+)
+
+// UsersPageData is the /admin/users page's input: the tenant's current
+// users plus either a validation Error from the create-user form or a
+// LastAdminError surfaced from a rejected delete (auth.ErrLastAdmin).
+type UsersPageData struct {
+	Users              []auth.User
+	Error              string
+	CurrentUserID      int64
+	Layout             LayoutData
+}
+
+templ UsersPage(data UsersPageData) {
+	@Layout("Users - Print Shop KDS", data.Layout) {
+		<main class="intake">
+			<h1>Users</h1>
+			if data.Error != "" {
+				<p class="banner banner--error">{ data.Error }</p>
+			}
+			<table class="users-table">
+				<thead>
+					<tr>
+						<th>Email</th>
+						<th>Role</th>
+						<th></th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, u := range data.Users {
+						<tr>
+							<td>{ u.Email }</td>
+							<td>{ string(u.Role) }</td>
+							<td>
+								if u.ID != data.CurrentUserID {
+									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/admin/users/%d/delete", u.ID)) }>
+										<button type="submit" class="btn btn--danger">Remove</button>
+									</form>
+								}
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+			<h2>Add a user</h2>
+			<form method="post" action="/admin/users" class="order-form">
+				<label class="field">
+					<span>Email</span>
+					<input type="email" name="email" required/>
+				</label>
+				<label class="field">
+					<span>Password</span>
+					<input type="password" name="password" minlength="8" required/>
+				</label>
+				<label class="field">
+					<span>Role</span>
+					<select name="role">
+						<option value="staff">Staff</option>
+						<option value="admin">Admin</option>
+					</select>
+				</label>
+				<button type="submit" class="btn btn--primary">Add User</button>
+			</form>
+		</main>
+	}
+}

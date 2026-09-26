@@ -1,0 +1,36 @@
+package views
+
+// SignupFormData is Signup's input - every typed field is echoed back on
+// a validation error except Password, which is never round-tripped.
+type SignupFormData struct {
+	ShopName string
+	Email    string
+	Error    string
+}
+
+templ Signup(data SignupFormData) {
+	@Layout("Create Your Shop - Print Shop KDS", LayoutData{}) {
+		<main class="intake">
+			<h1>Create Your Shop</h1>
+			if data.Error != "" {
+				<p class="banner banner--error">{ data.Error }</p>
+			}
+			<form method="post" action="/signup" class="order-form">
+				<label class="field">
+					<span>Shop name</span>
+					<input type="text" name="shop_name" value={ data.ShopName } required/>
+				</label>
+				<label class="field">
+					<span>Your email</span>
+					<input type="email" name="email" value={ data.Email } required/>
+				</label>
+				<label class="field">
+					<span>Password</span>
+					<input type="password" name="password" minlength="8" required/>
+				</label>
+				<button type="submit" class="btn btn--primary">Create Shop</button>
+			</form>
+			<p><a href="/login">Already have an account? Log in</a></p>
+		</main>
+	}
+}

@@ -1,6 +1,14 @@
 package views
 
-templ Layout(title string) {
+// LayoutData is the header chrome that depends on the current session -
+// zero value (as passed by the public login/signup pages) renders a bare
+// header with no tenant name, nav links, or logout control.
+type LayoutData struct {
+	TenantName string
+	IsAdmin    bool
+}
+
+templ Layout(title string, data LayoutData) {
 	<!DOCTYPE html>
 	<html lang="en" data-theme="dark">
 		<head>
@@ -15,7 +23,18 @@ templ Layout(title string) {
 		<body>
 			<header class="app-bar">
 				<a href="/" class="app-bar__title">Print Shop KDS</a>
-				<a href="/admin/new-order" class="app-bar__link">+ New Order</a>
+				if data.TenantName != "" {
+					<div class="app-bar__actions">
+						<span class="app-bar__tenant">{ data.TenantName }</span>
+						if data.IsAdmin {
+							<a href="/admin/new-order" class="app-bar__link">+ New Order</a>
+							<a href="/admin/users" class="app-bar__link">Users</a>
+						}
+						<form method="post" action="/logout" class="app-bar__logout-form">
+							<button type="submit" class="app-bar__link-button">Log Out</button>
+						</form>
+					</div>
+				}
 			</header>
 			{ children... }
 			<script src="/static/js/htmx.min.js"></script>

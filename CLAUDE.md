@@ -6,10 +6,14 @@ code in this repository.
 ## What this is
 
 print-kds is a self-hosted Kitchen Display System (KDS) for a 3D print shop
-floor: a single shared board, meant to run full-screen on a touchscreen or
+floor: a shared board, meant to run full-screen on a touchscreen or
 tablet in the print room, tracking each print item from queue through
-printing, cleaning/QC, packing, and shipment. There's no login and no
-multi-tenancy — one shop, one board. See `README.md` for the full feature
+printing, cleaning/QC, packing, and shipment. It's multi-tenant: one
+shared instance/database serves many shops, each behind a login, isolated
+by `orders.tenant_id` (see `internal/board.Store.beginItemTxAny`). Two
+roles - `admin` (order intake, user management) and `staff` (board
+operation only) - gate `/admin/*` routes; see `internal/auth` and
+`internal/server/middleware/auth.go`. See `README.md` for the full feature
 rundown and `docs/architecture.md` / `docs/schema.md` for the technical
 detail behind the board and its data model.
 
@@ -61,6 +65,13 @@ output = success) before trusting an IDE diagnostic over it.
   build time and applied automatically on startup — don't add a manual
   migrate step, and don't edit an already-applied migration; add a new one
   instead.
+- **Tenant scoping**: every `internal/board.Store` method takes a
+  `tenantID int64` and enforces it in `beginItemTx`/`beginItemTxAny`'s
+  `FOR UPDATE` query (`AND o.tenant_id = $N`) or `BoardColumns`'/
+  `CreateOrder`'s query — that's the actual security boundary, not just
+  `middleware.RequireAuth`. A new `Store` method needs the same treatment;
+  a controller reads the current tenant via
+  `middleware.CurrentTenantID(c)`, never from a form field or param.
 
 ## Coding standards
 
@@ -89,12 +100,19 @@ output = success) before trusting an IDE diagnostic over it.
 ## Architecture
 
 **Layout**: `cmd/api` is the server entrypoint; `cmd/dbreset`/`cmd/dbseed`
-are dev CLI tools (`make db-reset`/`make seed`). `internal/` is split by
-concern:
+are dev CLI tools (`make db-reset`/`make seed`); `cmd/createuser`
+provisions a login onto an existing tenant (e.g. the migration-backfilled
+"Default Shop") outside the self-serve `/signup` flow, which only ever
+creates a brand-new tenant. `internal/` is split by concern:
 
 - `internal/board` — the domain layer: `Store` (print_items/orders/
   shipments queries, the status-transition state machine, and
-  `CreateOrder` for the manual intake form). See `docs/architecture.md`.
+  `CreateOrder` for the manual intake form), every method tenant-scoped
+  (see "Tenant scoping" above). See `docs/architecture.md`.
+- `internal/auth` — tenants/users/sessions: `Store.SignUp` (new tenant +
+  first admin user), `Authenticate`, `CreateSession`/`ValidateSession`/
+  `DeleteSession` (opaque token, hashed before storage), and
+  `ListUsers`/`CreateUser`/`DeleteUser` for admin-driven user management.
 - `internal/database` — connection setup + goose migrations, embedded from
   `internal/database/migrations/*.sql` and run automatically on every
   startup (`database.New()` calls `migrate()` — no separate migrate step).
@@ -107,10 +125,13 @@ concern:
   read this first to find where a given endpoint lives),
   `controllers/` (one file per page/feature; `render.go`'s `render()`
   helper writes a templ component as the response), `middleware/`
-  (`RequestID`, `Recover`).
+  (`RequestID`, `Recover`, `RequireAuth`/`RequireAdmin` — see
+  `docs/architecture.md`'s auth section).
 - `internal/views` (+ `internal/views/components`) — templ view templates
   rendered server-side and swapped into the page via htmx; the board's
   column/card components and the KDS layout shell live here.
+  `layout.templ`'s `Layout` takes a `LayoutData{TenantName, IsAdmin}` for
+  the header's tenant name/nav/logout — every page passes one through.
 - `web/static` — the CSS design system (plain files, no build step beyond
   serving them statically) and `htmx.min.js`.
 

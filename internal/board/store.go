@@ -54,6 +54,27 @@ type PrintItem struct {
 	OrderNumber  string
 	CustomerName string
 	DueDate      time.Time
+
+	// LastUpdatedByEmail is the email of whoever most recently ran a
+	// transition on this item - "" until its first transition, or if
+	// that user has since been removed (last_updated_by ON DELETE SET
+	// NULL). See PrintItemEvent for the full history, not just the most
+	// recent touch.
+	LastUpdatedByEmail string
+}
+
+// PrintItemEvent is one row of a print item's audit trail
+// (print_item_events) - who did what, and when. FromStatus == "" marks a
+// creation event (a fresh item from CreateOrder, or a sibling row split
+// off by a partial QC failure) rather than an ordinary transition.
+// UserEmail is "" if the acting user has since been removed.
+type PrintItemEvent struct {
+	ID         int64
+	FromStatus string
+	ToStatus   string
+	Detail     string
+	UserEmail  string
+	CreatedAt  time.Time
 }
 
 // Shipment mirrors a shipments row.
@@ -78,15 +99,88 @@ const itemColumns = `
 	pi.id, pi.order_id, pi.file_name, pi.color_material, pi.quantity_required,
 	pi.quantity_completed, pi.status, pi.assigned_printer, pi.qc_failure_reason,
 	pi.reprint_count, pi.created_at, pi.status_changed_at,
-	o.order_number, o.customer_name, o.due_date`
+	o.order_number, o.customer_name, o.due_date, u.email`
+
+// itemJoins must accompany every query built on itemColumns - it resolves
+// u.email (last_updated_by's display name) alongside the orders join
+// every such query already needs.
+const itemJoins = `
+JOIN orders o ON o.id = pi.order_id
+LEFT JOIN users u ON u.id = pi.last_updated_by`
 
 func scanItem(row interface{ Scan(...any) error }, item *PrintItem) error {
-	return row.Scan(
+	var lastUpdatedByEmail sql.NullString
+	if err := row.Scan(
 		&item.ID, &item.OrderID, &item.FileName, &item.ColorMaterial,
 		&item.QuantityRequired, &item.QuantityCompleted, &item.Status, &item.AssignedPrinter,
 		&item.QCFailureReason, &item.ReprintCount,
 		&item.CreatedAt, &item.StatusChangedAt, &item.OrderNumber, &item.CustomerName, &item.DueDate,
-	)
+		&lastUpdatedByEmail,
+	); err != nil {
+		return err
+	}
+	item.LastUpdatedByEmail = lastUpdatedByEmail.String
+	return nil
+}
+
+// lookupUserEmail resolves userID's email within tx, for stamping the
+// acting user's email directly onto a PrintItem this request is about to
+// return - the caller shouldn't have to make a second round trip (or wait
+// for the next BoardColumns load) just to see who they are.
+func lookupUserEmail(ctx context.Context, tx *sql.Tx, userID int64) (string, error) {
+	var email string
+	if err := tx.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email); err != nil {
+		return "", fmt.Errorf("look up user %d: %w", userID, err)
+	}
+	return email, nil
+}
+
+// recordEvent appends one row to print_item_events - the append-only
+// audit trail every transition method (and CreateOrder, for a fresh
+// item's creation) writes to inside its own transaction. fromStatus ==
+// "" marks a creation event rather than a status transition.
+func recordEvent(ctx context.Context, tx *sql.Tx, itemID, userID int64, fromStatus, toStatus, detail string) error {
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO print_item_events (print_item_id, user_id, from_status, to_status, detail)
+VALUES ($1, $2, $3, $4, $5)`,
+		itemID, userID, fromStatus, toStatus, detail,
+	); err != nil {
+		return fmt.Errorf("record event for item %d: %w", itemID, err)
+	}
+	return nil
+}
+
+// ItemHistory returns itemID's full audit trail, oldest first - tenant
+// scoped the same way beginItemTxAny is (a cross-tenant itemID returns an
+// empty slice, not another shop's history).
+func (s *Store) ItemHistory(ctx context.Context, tenantID, itemID int64) ([]PrintItemEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT e.id, e.from_status, e.to_status, e.detail, e.created_at, u.email
+FROM print_item_events e
+JOIN print_items pi ON pi.id = e.print_item_id
+JOIN orders o ON o.id = pi.order_id
+LEFT JOIN users u ON u.id = e.user_id
+WHERE e.print_item_id = $1 AND o.tenant_id = $2
+ORDER BY e.created_at ASC`, itemID, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("query item %d history: %w", itemID, err)
+	}
+	defer rows.Close()
+
+	var events []PrintItemEvent
+	for rows.Next() {
+		var e PrintItemEvent
+		var userEmail sql.NullString
+		if err := rows.Scan(&e.ID, &e.FromStatus, &e.ToStatus, &e.Detail, &e.CreatedAt, &userEmail); err != nil {
+			return nil, fmt.Errorf("scan item %d history: %w", itemID, err)
+		}
+		e.UserEmail = userEmail.String
+		events = append(events, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate item %d history: %w", itemID, err)
+	}
+	return events, nil
 }
 
 // BoardColumns returns every live (non-packed) print item grouped by
@@ -101,18 +195,18 @@ func scanItem(row interface{ Scan(...any) error }, item *PrintItem) error {
 // first, i.e. however long it's been sitting in that state). Packed items
 // are terminal and drop off the live board entirely - this is a
 // shop-floor status display, not an order history.
-func (s *Store) BoardColumns(ctx context.Context) (map[string][]PrintItem, error) {
+func (s *Store) BoardColumns(ctx context.Context, tenantID int64) (map[string][]PrintItem, error) {
 	query := `
 SELECT` + itemColumns + `
 FROM print_items pi
-JOIN orders o ON o.id = pi.order_id
-WHERE pi.status IN ('queued', 'printing', 'cleaning_qc', 'ready_to_pack')
+` + itemJoins + `
+WHERE pi.status IN ('queued', 'printing', 'cleaning_qc', 'ready_to_pack') AND o.tenant_id = $1
 ORDER BY pi.status,
 	CASE WHEN pi.status = 'queued' THEN (pi.reprint_count = 0) END,
 	CASE WHEN pi.status = 'queued' THEN o.due_date END ASC,
 	pi.created_at ASC`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("query board columns: %w", err)
 	}
@@ -161,7 +255,7 @@ type NewOrder struct {
 // ErrDuplicateOrderNumber (wrap-checkable via errors.Is) if order_number's
 // unique constraint rejects the insert, so the form can show a friendly
 // message instead of a raw constraint error.
-func (s *Store) CreateOrder(ctx context.Context, in NewOrder) (int64, error) {
+func (s *Store) CreateOrder(ctx context.Context, tenantID, userID int64, in NewOrder) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin transaction: %w", err)
@@ -170,9 +264,9 @@ func (s *Store) CreateOrder(ctx context.Context, in NewOrder) (int64, error) {
 
 	var orderID int64
 	err = tx.QueryRowContext(ctx, `
-INSERT INTO orders (order_number, customer_name, shipping_address, due_date, status)
-VALUES ($1, $2, '{}', $3, 'pending')
-RETURNING id`, in.OrderNumber, in.CustomerName, in.DueDate).Scan(&orderID)
+INSERT INTO orders (tenant_id, order_number, customer_name, shipping_address, due_date, status)
+VALUES ($1, $2, $3, '{}', $4, 'pending')
+RETURNING id`, tenantID, in.OrderNumber, in.CustomerName, in.DueDate).Scan(&orderID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -183,10 +277,15 @@ RETURNING id`, in.OrderNumber, in.CustomerName, in.DueDate).Scan(&orderID)
 
 	for _, item := range in.Items {
 		qty := max(item.QuantityRequired, 1)
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO print_items (order_id, file_name, color_material, quantity_required, status)
-VALUES ($1, $2, $3, $4, 'queued')`, orderID, item.FileName, item.ColorMaterial, qty); err != nil {
+		var itemID int64
+		if err := tx.QueryRowContext(ctx, `
+INSERT INTO print_items (order_id, file_name, color_material, quantity_required, status, last_updated_by)
+VALUES ($1, $2, $3, $4, 'queued', $5)
+RETURNING id`, orderID, item.FileName, item.ColorMaterial, qty, userID).Scan(&itemID); err != nil {
 			return 0, fmt.Errorf("insert print item %s: %w", item.FileName, err)
+		}
+		if err := recordEvent(ctx, tx, itemID, userID, "", "queued", ""); err != nil {
+			return 0, err
 		}
 	}
 
@@ -204,8 +303,8 @@ VALUES ($1, $2, $3, $4, 'queued')`, orderID, item.FileName, item.ColorMaterial, 
 // method registers is a no-op after a successful commit (Rollback on an
 // already-committed tx just returns sql.ErrTxDone, which every caller here
 // ignores by not checking its return value).
-func (s *Store) beginItemTx(ctx context.Context, itemID int64, expectedStatus string) (*sql.Tx, PrintItem, error) {
-	return s.beginItemTxAny(ctx, itemID, expectedStatus)
+func (s *Store) beginItemTx(ctx context.Context, tenantID, itemID int64, expectedStatus string) (*sql.Tx, PrintItem, error) {
+	return s.beginItemTxAny(ctx, tenantID, itemID, expectedStatus)
 }
 
 // beginItemTxAny is beginItemTx's more permissive sibling: it accepts any
@@ -214,7 +313,7 @@ func (s *Store) beginItemTx(ctx context.Context, itemID int64, expectedStatus st
 // beginItemTx (the single-status case every other transition method uses)
 // is just this with one allowed status, so there's one lock+check
 // implementation rather than two.
-func (s *Store) beginItemTxAny(ctx context.Context, itemID int64, allowedStatuses ...string) (*sql.Tx, PrintItem, error) {
+func (s *Store) beginItemTxAny(ctx context.Context, tenantID, itemID int64, allowedStatuses ...string) (*sql.Tx, PrintItem, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, PrintItem{}, fmt.Errorf("begin transaction: %w", err)
@@ -224,9 +323,9 @@ func (s *Store) beginItemTxAny(ctx context.Context, itemID int64, allowedStatuse
 	row := tx.QueryRowContext(ctx, `
 SELECT`+itemColumns+`
 FROM print_items pi
-JOIN orders o ON o.id = pi.order_id
-WHERE pi.id = $1
-FOR UPDATE OF pi`, itemID)
+`+itemJoins+`
+WHERE pi.id = $1 AND o.tenant_id = $2
+FOR UPDATE OF pi`, itemID, tenantID)
 	if err := scanItem(row, &item); err != nil {
 		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
@@ -248,22 +347,37 @@ FOR UPDATE OF pi`, itemID)
 // - and may be blank; nobody is required to fill it in). If every other
 // item in its order is still queued (this is the order's first item to
 // start), the order itself advances from pending to in_progress.
-func (s *Store) StartPrint(ctx context.Context, itemID int64, assignedPrinter string) (PrintItem, error) {
-	tx, item, err := s.beginItemTx(ctx, itemID, "queued")
+func (s *Store) StartPrint(ctx context.Context, tenantID, userID, itemID int64, assignedPrinter string) (PrintItem, error) {
+	tx, item, err := s.beginItemTx(ctx, tenantID, itemID, "queued")
 	if err != nil {
 		return PrintItem{}, err
 	}
 	defer tx.Rollback()
 
+	email, err := lookupUserEmail(ctx, tx, userID)
+	if err != nil {
+		return PrintItem{}, err
+	}
+
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE print_items SET status = 'printing', assigned_printer = $2, status_changed_at = now() WHERE id = $1`,
-		itemID, assignedPrinter,
+		`UPDATE print_items SET status = 'printing', assigned_printer = $2, status_changed_at = now(), last_updated_by = $3 WHERE id = $1`,
+		itemID, assignedPrinter, userID,
 	); err != nil {
 		return PrintItem{}, fmt.Errorf("start print for item %d: %w", itemID, err)
 	}
+	fromStatus := item.Status
 	item.Status = "printing"
 	item.AssignedPrinter = assignedPrinter
 	item.StatusChangedAt = time.Now()
+	item.LastUpdatedByEmail = email
+
+	detail := ""
+	if assignedPrinter != "" {
+		detail = fmt.Sprintf("printer: %s", assignedPrinter)
+	}
+	if err := recordEvent(ctx, tx, itemID, userID, fromStatus, item.Status, detail); err != nil {
+		return PrintItem{}, err
+	}
 
 	var siblingsAlreadyMoving int
 	if err := tx.QueryRowContext(ctx,
@@ -288,18 +402,29 @@ func (s *Store) StartPrint(ctx context.Context, itemID int64, assignedPrinter st
 }
 
 // PopOffBed moves a printing item into cleaning/QC.
-func (s *Store) PopOffBed(ctx context.Context, itemID int64) (PrintItem, error) {
-	tx, item, err := s.beginItemTx(ctx, itemID, "printing")
+func (s *Store) PopOffBed(ctx context.Context, tenantID, userID, itemID int64) (PrintItem, error) {
+	tx, item, err := s.beginItemTx(ctx, tenantID, itemID, "printing")
 	if err != nil {
 		return PrintItem{}, err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `UPDATE print_items SET status = 'cleaning_qc', status_changed_at = now() WHERE id = $1`, itemID); err != nil {
+	email, err := lookupUserEmail(ctx, tx, userID)
+	if err != nil {
+		return PrintItem{}, err
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE print_items SET status = 'cleaning_qc', status_changed_at = now(), last_updated_by = $2 WHERE id = $1`, itemID, userID); err != nil {
 		return PrintItem{}, fmt.Errorf("pop item %d off bed: %w", itemID, err)
 	}
+	fromStatus := item.Status
 	item.Status = "cleaning_qc"
 	item.StatusChangedAt = time.Now()
+	item.LastUpdatedByEmail = email
+
+	if err := recordEvent(ctx, tx, itemID, userID, fromStatus, item.Status, ""); err != nil {
+		return PrintItem{}, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return PrintItem{}, fmt.Errorf("commit pop off bed for item %d: %w", itemID, err)
@@ -316,27 +441,42 @@ func (s *Store) PopOffBed(ctx context.Context, itemID int64) (PrintItem, error) 
 // reprint_count/qc_failure_reason rather than adding new columns.
 // assigned_printer is cleared back to ” since whichever printer failed
 // isn't "still running" this item anymore.
-func (s *Store) FailPrint(ctx context.Context, itemID int64, reason string) (PrintItem, error) {
-	tx, item, err := s.beginItemTx(ctx, itemID, "printing")
+func (s *Store) FailPrint(ctx context.Context, tenantID, userID, itemID int64, reason string) (PrintItem, error) {
+	tx, item, err := s.beginItemTx(ctx, tenantID, itemID, "printing")
 	if err != nil {
 		return PrintItem{}, err
 	}
 	defer tx.Rollback()
 
+	email, err := lookupUserEmail(ctx, tx, userID)
+	if err != nil {
+		return PrintItem{}, err
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE print_items
-		SET status = 'queued', quantity_completed = 0, assigned_printer = '', reprint_count = reprint_count + 1, qc_failure_reason = $2, status_changed_at = now()
+		SET status = 'queued', quantity_completed = 0, assigned_printer = '', reprint_count = reprint_count + 1, qc_failure_reason = $2, status_changed_at = now(), last_updated_by = $3
 		WHERE id = $1`,
-		itemID, reason,
+		itemID, reason, userID,
 	); err != nil {
 		return PrintItem{}, fmt.Errorf("fail print for item %d: %w", itemID, err)
 	}
+	fromStatus := item.Status
 	item.Status = "queued"
 	item.QuantityCompleted = 0
 	item.AssignedPrinter = ""
 	item.ReprintCount++
 	item.QCFailureReason = reason
 	item.StatusChangedAt = time.Now()
+	item.LastUpdatedByEmail = email
+
+	detail := ""
+	if reason != "" {
+		detail = fmt.Sprintf("reason: %s", reason)
+	}
+	if err := recordEvent(ctx, tx, itemID, userID, fromStatus, item.Status, detail); err != nil {
+		return PrintItem{}, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return PrintItem{}, fmt.Errorf("commit fail print for item %d: %w", itemID, err)
@@ -360,8 +500,8 @@ func (s *Store) FailPrint(ctx context.Context, itemID int64, reason string) (Pri
 // where the returned split item is non-nil. failureReason is stored
 // whenever any units failed (quantityPassed < required); it's ignored
 // (not persisted) when the whole thing passed.
-func (s *Store) RecordQCResult(ctx context.Context, itemID int64, quantityPassed int, failureReason string) (updated PrintItem, split *PrintItem, err error) {
-	tx, item, err := s.beginItemTx(ctx, itemID, "cleaning_qc")
+func (s *Store) RecordQCResult(ctx context.Context, tenantID, userID, itemID int64, quantityPassed int, failureReason string) (updated PrintItem, split *PrintItem, err error) {
+	tx, item, err := s.beginItemTx(ctx, tenantID, itemID, "cleaning_qc")
 	if err != nil {
 		return PrintItem{}, nil, err
 	}
@@ -372,26 +512,39 @@ func (s *Store) RecordQCResult(ctx context.Context, itemID int64, quantityPassed
 		return PrintItem{}, nil, fmt.Errorf("%w: %d passed of %d required", ErrInvalidQuantity, quantityPassed, item.QuantityRequired)
 	}
 
+	email, err := lookupUserEmail(ctx, tx, userID)
+	if err != nil {
+		return PrintItem{}, nil, err
+	}
+
+	fromStatus := item.Status
+	originalRequired := item.QuantityRequired
+
 	switch quantityPassed {
 	case item.QuantityRequired:
 		// Full pass.
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE print_items SET status = 'ready_to_pack', quantity_completed = $2, status_changed_at = now() WHERE id = $1`,
-			itemID, quantityPassed,
+			`UPDATE print_items SET status = 'ready_to_pack', quantity_completed = $2, status_changed_at = now(), last_updated_by = $3 WHERE id = $1`,
+			itemID, quantityPassed, userID,
 		); err != nil {
 			return PrintItem{}, nil, fmt.Errorf("pass qc for item %d: %w", itemID, err)
 		}
 		item.Status = "ready_to_pack"
 		item.QuantityCompleted = quantityPassed
 		item.StatusChangedAt = time.Now()
+		item.LastUpdatedByEmail = email
+
+		if err := recordEvent(ctx, tx, itemID, userID, fromStatus, item.Status, fmt.Sprintf("passed %d/%d", quantityPassed, originalRequired)); err != nil {
+			return PrintItem{}, nil, err
+		}
 
 	case 0:
 		// Full reprint.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE print_items
-			SET status = 'queued', quantity_completed = 0, reprint_count = reprint_count + 1, qc_failure_reason = $2, status_changed_at = now()
+			SET status = 'queued', quantity_completed = 0, reprint_count = reprint_count + 1, qc_failure_reason = $2, status_changed_at = now(), last_updated_by = $3
 			WHERE id = $1`,
-			itemID, failureReason,
+			itemID, failureReason, userID,
 		); err != nil {
 			return PrintItem{}, nil, fmt.Errorf("re-queue item %d: %w", itemID, err)
 		}
@@ -400,6 +553,15 @@ func (s *Store) RecordQCResult(ctx context.Context, itemID int64, quantityPassed
 		item.ReprintCount++
 		item.QCFailureReason = failureReason
 		item.StatusChangedAt = time.Now()
+		item.LastUpdatedByEmail = email
+
+		detail := fmt.Sprintf("passed 0/%d", originalRequired)
+		if failureReason != "" {
+			detail += fmt.Sprintf(", reason: %s", failureReason)
+		}
+		if err := recordEvent(ctx, tx, itemID, userID, fromStatus, item.Status, detail); err != nil {
+			return PrintItem{}, nil, err
+		}
 
 	default:
 		// Partial split: the original row keeps the passed quantity and
@@ -410,9 +572,9 @@ func (s *Store) RecordQCResult(ctx context.Context, itemID int64, quantityPassed
 
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE print_items
-			SET status = 'ready_to_pack', quantity_required = $2, quantity_completed = $2, status_changed_at = now()
+			SET status = 'ready_to_pack', quantity_required = $2, quantity_completed = $2, status_changed_at = now(), last_updated_by = $3
 			WHERE id = $1`,
-			itemID, quantityPassed,
+			itemID, quantityPassed, userID,
 		); err != nil {
 			return PrintItem{}, nil, fmt.Errorf("split-pass qc for item %d: %w", itemID, err)
 		}
@@ -420,24 +582,34 @@ func (s *Store) RecordQCResult(ctx context.Context, itemID int64, quantityPassed
 		item.QuantityRequired = quantityPassed
 		item.QuantityCompleted = quantityPassed
 		item.StatusChangedAt = time.Now()
+		item.LastUpdatedByEmail = email
+
+		detail := fmt.Sprintf("passed %d/%d", quantityPassed, originalRequired)
+		if failureReason != "" {
+			detail += fmt.Sprintf(", reason: %s", failureReason)
+		}
+		if err := recordEvent(ctx, tx, itemID, userID, fromStatus, item.Status, detail); err != nil {
+			return PrintItem{}, nil, err
+		}
 
 		var newItem PrintItem
 		newItem.OrderNumber = item.OrderNumber
 		newItem.CustomerName = item.CustomerName
 		newItem.DueDate = item.DueDate
+		newItem.LastUpdatedByEmail = email
 
 		if err := tx.QueryRowContext(ctx, `
 INSERT INTO print_items (
 	order_id, file_name, color_material, quantity_required, quantity_completed,
-	status, assigned_printer, qc_failure_reason, reprint_count, status_changed_at
+	status, assigned_printer, qc_failure_reason, reprint_count, status_changed_at, last_updated_by
 )
-VALUES ($1, $2, $3, $4, 0, 'queued', $5, $6, $7, now())
+VALUES ($1, $2, $3, $4, 0, 'queued', $5, $6, $7, now(), $8)
 RETURNING id, order_id, file_name, color_material, quantity_required,
 	quantity_completed, status, assigned_printer, qc_failure_reason,
 	reprint_count, created_at, status_changed_at`,
 			item.OrderID, item.FileName, item.ColorMaterial,
 			failedRemainder,
-			item.AssignedPrinter, failureReason, item.ReprintCount+1,
+			item.AssignedPrinter, failureReason, item.ReprintCount+1, userID,
 		).Scan(
 			&newItem.ID, &newItem.OrderID, &newItem.FileName, &newItem.ColorMaterial,
 			&newItem.QuantityRequired, &newItem.QuantityCompleted, &newItem.Status,
@@ -447,6 +619,14 @@ RETURNING id, order_id, file_name, color_material, quantity_required,
 			return PrintItem{}, nil, fmt.Errorf("insert split item for %d: %w", itemID, err)
 		}
 		split = &newItem
+
+		splitDetail := fmt.Sprintf("split from item #%d after partial QC failure", itemID)
+		if failureReason != "" {
+			splitDetail += fmt.Sprintf(", reason: %s", failureReason)
+		}
+		if err := recordEvent(ctx, tx, newItem.ID, userID, "", "queued", splitDetail); err != nil {
+			return PrintItem{}, nil, err
+		}
 	}
 
 	var remaining int
@@ -488,18 +668,29 @@ RETURNING id, order_id, file_name, color_material, quantity_required,
 // There is no real carrier/label-printer integration here - the tracking
 // number and label URL are locally generated placeholders (see the TODO
 // below); wiring a real carrier API is future work.
-func (s *Store) GenerateLabel(ctx context.Context, itemID int64) (PrintItem, *Shipment, error) {
-	tx, item, err := s.beginItemTx(ctx, itemID, "ready_to_pack")
+func (s *Store) GenerateLabel(ctx context.Context, tenantID, userID, itemID int64) (PrintItem, *Shipment, error) {
+	tx, item, err := s.beginItemTx(ctx, tenantID, itemID, "ready_to_pack")
 	if err != nil {
 		return PrintItem{}, nil, err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `UPDATE print_items SET status = 'packed', status_changed_at = now() WHERE id = $1`, itemID); err != nil {
+	email, err := lookupUserEmail(ctx, tx, userID)
+	if err != nil {
+		return PrintItem{}, nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE print_items SET status = 'packed', status_changed_at = now(), last_updated_by = $2 WHERE id = $1`, itemID, userID); err != nil {
 		return PrintItem{}, nil, fmt.Errorf("mark item %d packed: %w", itemID, err)
 	}
+	fromStatus := item.Status
 	item.Status = "packed"
 	item.StatusChangedAt = time.Now()
+	item.LastUpdatedByEmail = email
+
+	if err := recordEvent(ctx, tx, itemID, userID, fromStatus, item.Status, ""); err != nil {
+		return PrintItem{}, nil, err
+	}
 
 	// TODO: no real carrier integration - PKDS-<order>-<item>-<unix ts> and
 	// a stub /labels/<tracking>.pdf path stand in for a real
@@ -568,21 +759,32 @@ RETURNING id, order_id, carrier, tracking_number, label_url, shipped_at`,
 // cancellation - the order stays whatever it was), the order itself moves
 // to cancelled too, unless it's already shipped (a shipped order is done;
 // cancelling one more item on it after the fact doesn't un-ship it).
-func (s *Store) CancelItem(ctx context.Context, itemID int64) (PrintItem, error) {
-	tx, item, err := s.beginItemTxAny(ctx, itemID, "queued", "printing", "cleaning_qc", "ready_to_pack")
+func (s *Store) CancelItem(ctx context.Context, tenantID, userID, itemID int64) (PrintItem, error) {
+	tx, item, err := s.beginItemTxAny(ctx, tenantID, itemID, "queued", "printing", "cleaning_qc", "ready_to_pack")
 	if err != nil {
 		return PrintItem{}, err
 	}
 	defer tx.Rollback()
 
+	email, err := lookupUserEmail(ctx, tx, userID)
+	if err != nil {
+		return PrintItem{}, err
+	}
+
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE print_items SET status = 'cancelled', status_changed_at = now() WHERE id = $1`,
-		itemID,
+		`UPDATE print_items SET status = 'cancelled', status_changed_at = now(), last_updated_by = $2 WHERE id = $1`,
+		itemID, userID,
 	); err != nil {
 		return PrintItem{}, fmt.Errorf("cancel item %d: %w", itemID, err)
 	}
+	fromStatus := item.Status
 	item.Status = "cancelled"
 	item.StatusChangedAt = time.Now()
+	item.LastUpdatedByEmail = email
+
+	if err := recordEvent(ctx, tx, itemID, userID, fromStatus, item.Status, ""); err != nil {
+		return PrintItem{}, err
+	}
 
 	var stillLive int
 	if err := tx.QueryRowContext(ctx,
@@ -614,8 +816,8 @@ func (s *Store) CancelItem(ctx context.Context, itemID int64) (PrintItem, error)
 // now" information, so this isn't the right tool for that anymore. Rejects
 // newQuantityRequired < 1 with ErrInvalidQuantity - cancelling an item
 // entirely is CancelItem, not a quantity edit down to zero.
-func (s *Store) UpdateQuantity(ctx context.Context, itemID int64, newQuantityRequired int) (PrintItem, error) {
-	tx, item, err := s.beginItemTx(ctx, itemID, "queued")
+func (s *Store) UpdateQuantity(ctx context.Context, tenantID, userID, itemID int64, newQuantityRequired int) (PrintItem, error) {
+	tx, item, err := s.beginItemTx(ctx, tenantID, itemID, "queued")
 	if err != nil {
 		return PrintItem{}, err
 	}
@@ -626,14 +828,26 @@ func (s *Store) UpdateQuantity(ctx context.Context, itemID int64, newQuantityReq
 		return PrintItem{}, fmt.Errorf("%w: %d", ErrInvalidQuantity, newQuantityRequired)
 	}
 
+	email, err := lookupUserEmail(ctx, tx, userID)
+	if err != nil {
+		return PrintItem{}, err
+	}
+
+	oldQuantity := item.QuantityRequired
+
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE print_items SET quantity_required = $2, status_changed_at = now() WHERE id = $1`,
-		itemID, newQuantityRequired,
+		`UPDATE print_items SET quantity_required = $2, status_changed_at = now(), last_updated_by = $3 WHERE id = $1`,
+		itemID, newQuantityRequired, userID,
 	); err != nil {
 		return PrintItem{}, fmt.Errorf("update quantity for item %d: %w", itemID, err)
 	}
 	item.QuantityRequired = newQuantityRequired
 	item.StatusChangedAt = time.Now()
+	item.LastUpdatedByEmail = email
+
+	if err := recordEvent(ctx, tx, itemID, userID, item.Status, item.Status, fmt.Sprintf("quantity %d -> %d", oldQuantity, newQuantityRequired)); err != nil {
+		return PrintItem{}, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return PrintItem{}, fmt.Errorf("commit update quantity for item %d: %w", itemID, err)

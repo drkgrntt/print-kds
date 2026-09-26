@@ -2,6 +2,7 @@ package components
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"print-kds/internal/board"
@@ -23,6 +24,16 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm", hours, minutes)
 }
 
+// emailLocalPart trims an email down to its local part (before the "@")
+// for a compact display on a small card tile or history line - "Last:
+// dev" reads fine on a shop-floor tablet, "Last: dev@example.com" doesn't.
+func emailLocalPart(email string) string {
+	if i := strings.Index(email, "@"); i >= 0 {
+		return email[:i]
+	}
+	return email
+}
+
 // Card renders one print item's KDS tile.
 templ Card(item board.PrintItem) {
 	<article id={ fmt.Sprintf("item-%d", item.ID) } class="card" data-status={ item.Status }>
@@ -41,6 +52,17 @@ templ Card(item board.PrintItem) {
 		}
 		<p class="card__qty">{ fmt.Sprintf("%d / %d", item.QuantityCompleted, item.QuantityRequired) }</p>
 		<p class="card__elapsed">{ fmt.Sprintf("In %s: %s", item.Status, formatElapsed(time.Since(item.StatusChangedAt))) }</p>
+		if item.LastUpdatedByEmail != "" {
+			<p class="card__meta card__last-updated">{ fmt.Sprintf("Last: %s", emailLocalPart(item.LastUpdatedByEmail)) }</p>
+		}
+		<button
+			type="button"
+			class="btn btn--secondary card__history-toggle"
+			hx-get={ fmt.Sprintf("/print-items/%d/history", item.ID) }
+			hx-target={ fmt.Sprintf("#item-%d-history", item.ID) }
+			hx-swap="innerHTML"
+		>[ HISTORY ]</button>
+		<div id={ fmt.Sprintf("item-%d-history", item.ID) } class="card__history"></div>
 		<div class="card__actions">
 			@cardActions(item)
 		</div>
