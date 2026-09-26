@@ -1,0 +1,100 @@
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+}
+
+body {
+	background: var(--color-bg);
+	color: var(--color-text);
+	font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	font-size: 18px;
+	line-height: 1.4;
+	-webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+	margin: 0 0 var(--space-sm) 0;
+	font-weight: 700;
+}
+
+p {
+	margin: 0;
+}
+
+button {
+	font: inherit;
+	cursor: pointer;
+}
+
+a {
+	color: var(--color-accent);
+}
+
+/* Shared top bar (see internal/views/layout.templ) - present on every
+   page, not just the board, so "+ New Order" is always one tap away. */
+.app-bar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: var(--space-md) var(--space-lg);
+	background: var(--color-surface);
+	border-bottom: 1px solid var(--color-border);
+}
+
+.app-bar__title {
+	font-size: 1.2rem;
+	font-weight: 700;
+	text-decoration: none;
+	color: var(--color-text);
+}
+
+.app-bar__link {
+	min-height: var(--touch-target-min);
+	display: flex;
+	align-items: center;
+	padding: 0 var(--space-md);
+	border-radius: var(--radius-md);
+	background: var(--color-accent);
+	color: var(--color-bg);
+	font-weight: 700;
+	text-decoration: none;
+}
+
+/* Real touch targets, not just clickable text - this is tapped on a
+   tablet/kiosk near a printer, not clicked with a mouse. */
+.btn {
+	min-height: var(--touch-target-min);
+	min-width: var(--touch-target-min);
+	padding: var(--space-sm) var(--space-md);
+	border-radius: var(--radius-md);
+	border: 2px solid transparent;
+	font-weight: 700;
+	font-size: 1rem;
+	letter-spacing: 0.02em;
+	color: var(--color-bg);
+	background: var(--color-text);
+	transition: transform 0.08s ease, background-color 0.08s ease;
+}
+
+.btn:active {
+	transform: scale(0.96);
+}
+
+.btn--primary {
+	background: var(--color-success);
+}
+
+.btn--danger {
+	background: var(--color-danger);
+	color: #1a0505;
+}

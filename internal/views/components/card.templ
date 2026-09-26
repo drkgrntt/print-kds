@@ -1,0 +1,38 @@
+package components
+
+import (
+	"fmt"
+
+	"print-kds/internal/board"
+)
+
+// Card renders one print item's KDS tile.
+templ Card(item board.PrintItem) {
+	<article id={ fmt.Sprintf("item-%d", item.ID) } class="card" data-status={ item.Status }>
+		<header class="card__header">
+			<span class="card__order">{ item.OrderNumber }</span>
+			<span class="card__due">{ item.DueDate.Format("Jan 2") }</span>
+		</header>
+		<h3 class="card__file">{ item.FileName }</h3>
+		<p class="card__meta">{ item.ColorMaterial }</p>
+		<p class="card__meta">{ item.CustomerName }</p>
+		<p class="card__qty">{ fmt.Sprintf("%d / %d", item.QuantityCompleted, item.QuantityRequired) }</p>
+		<div class="card__actions">
+			@cardActions(item)
+		</div>
+	</article>
+}
+
+templ cardActions(item board.PrintItem) {
+	switch item.Status {
+		case "queued":
+			<button class="btn btn--primary" hx-post={ fmt.Sprintf("/print-items/%d/start", item.ID) } hx-swap="none">[ START PRINT ]</button>
+		case "printing":
+			<button class="btn btn--primary" hx-post={ fmt.Sprintf("/print-items/%d/pop", item.ID) } hx-swap="none">[ POP OFF BED ]</button>
+		case "cleaning_qc":
+			<button class="btn btn--primary" hx-post={ fmt.Sprintf("/print-items/%d/pass-qc", item.ID) } hx-swap="none">[ PASS QC ]</button>
+			<button class="btn btn--danger" hx-post={ fmt.Sprintf("/print-items/%d/reprint", item.ID) } hx-swap="none">[ RE-PRINT ]</button>
+		case "ready_to_pack":
+			<button class="btn btn--primary" hx-post={ fmt.Sprintf("/print-items/%d/generate-label", item.ID) } hx-swap="none">[ GENERATE LABEL ]</button>
+	}
+}

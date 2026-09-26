@@ -1,0 +1,66 @@
+package views
+
+// NewOrderItemRow is one print-item row's typed values, echoed back as-is
+// on a validation error so re-submitting the form doesn't lose what was
+// already typed.
+type NewOrderItemRow struct {
+	FileName      string
+	ColorMaterial string
+	Quantity      string
+}
+
+// NewOrderFormData is NewOrderForm's full input: the order fields, its
+// item rows, and either a validation Error or a CreatedOrderNumber success
+// message (never both at once).
+type NewOrderFormData struct {
+	OrderNumber        string
+	CustomerName       string
+	DueDate            string
+	Items              []NewOrderItemRow
+	Error              string
+	CreatedOrderNumber string
+}
+
+templ NewOrderForm(data NewOrderFormData) {
+	@Layout("New Order - Print Shop KDS") {
+		<main class="intake">
+			<h1>New Order</h1>
+			if data.CreatedOrderNumber != "" {
+				<p class="banner banner--success">Order { data.CreatedOrderNumber } created and queued for printing.</p>
+			}
+			if data.Error != "" {
+				<p class="banner banner--error">{ data.Error }</p>
+			}
+			<form method="post" action="/admin/new-order" class="order-form">
+				<label class="field">
+					<span>Order number</span>
+					<input type="text" name="order_number" value={ data.OrderNumber } required/>
+				</label>
+				<label class="field">
+					<span>Customer name</span>
+					<input type="text" name="customer_name" value={ data.CustomerName } required/>
+				</label>
+				<label class="field">
+					<span>Due date</span>
+					<input type="date" name="due_date" value={ data.DueDate } required/>
+				</label>
+				<h2>Print items</h2>
+				<div id="item-rows">
+					for _, row := range data.Items {
+						@ItemRow(row)
+					}
+				</div>
+				<button type="button" class="btn" hx-get="/admin/new-order/item-row" hx-target="#item-rows" hx-swap="beforeend">+ Add another item</button>
+				<button type="submit" class="btn btn--primary">Create order</button>
+			</form>
+		</main>
+	}
+}
+
+templ ItemRow(row NewOrderItemRow) {
+	<div class="item-row">
+		<input type="text" name="file_name" placeholder="File name (e.g. bracket_v2.gcode)" value={ row.FileName }/>
+		<input type="text" name="color_material" placeholder="Color / material" value={ row.ColorMaterial }/>
+		<input type="number" name="quantity_required" placeholder="Qty" min="1" value={ row.Quantity }/>
+	</div>
+}

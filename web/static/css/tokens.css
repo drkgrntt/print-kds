@@ -1,0 +1,24 @@
+:root {
+	--color-bg: #0b0d10;
+	--color-surface: #15181d;
+	--color-surface-raised: #1e2229;
+	--color-border: #343a42;
+	--color-text: #f5f7fa;
+	--color-text-muted: #9aa3ad;
+
+	--color-success: #3ddc84;
+	--color-danger: #ff5c5c;
+	--color-accent: #ffb020;
+
+	--radius-md: 8px;
+	--radius-lg: 14px;
+
+	--space-xs: 4px;
+	--space-sm: 8px;
+	--space-md: 16px;
+	--space-lg: 24px;
+
+	/* Kiosk buttons are tapped with a finger, sometimes a gloved one - 48px
+	   is the accepted minimum comfortable touch target size. */
+	--touch-target-min: 48px;
+}

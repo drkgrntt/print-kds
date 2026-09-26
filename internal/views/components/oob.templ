@@ -1,0 +1,39 @@
+package components
+
+import (
+	"fmt"
+
+	"print-kds/internal/board"
+)
+
+// DeleteOOB removes a card from wherever it currently sits in the DOM (htmx
+// matches purely by id, regardless of which column it's actually in right
+// now) - the first half of every transition response, paired with
+// InsertOOB below.
+templ DeleteOOB(itemID int64) {
+	<div id={ fmt.Sprintf("item-%d", itemID) } hx-swap-oob="delete"></div>
+}
+
+// InsertOOB re-renders item's card, wrapped in a throwaway container that
+// appends it into its new column's list - the second half of a transition
+// response. A transition handler sends DeleteOOB then InsertOOB back to
+// back: htmx treats out-of-band swaps as independent of the triggering
+// request's own target, so this is how a card "moves" columns without a
+// full board re-render.
+//
+// The wrapping <div> matters: for any hx-swap-oob style other than
+// "true"/"outerHTML" (a positional one like "beforeend:<selector>" here),
+// htmx discards the OOB element itself and inserts only its *children* at
+// that position - it's a documented htmx pattern (the OOB element is a
+// disposable delivery wrapper, not the content). Putting hx-swap-oob
+// directly on Card's own root, as this used to do, meant htmx stripped
+// Card's <article id="item-N" class="card" data-status="..."> tag on every
+// transition and spliced its bare inner tags loose into the column - no
+// id, no card styling, not a real card. Wrapping Card in a throwaway <div>
+// gives htmx something disposable to discard instead, so Card itself
+// survives intact as the inserted child.
+templ InsertOOB(status string, item board.PrintItem) {
+	<div hx-swap-oob={ fmt.Sprintf("beforeend:#column-%s-list", status) }>
+		@Card(item)
+	</div>
+}

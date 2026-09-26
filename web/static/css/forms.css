@@ -1,0 +1,66 @@
+/* Manual order-intake form (/admin/new-order) - the board itself has no
+   forms, so this stays split out of board.css per-concern. */
+
+.intake {
+	max-width: 640px;
+	margin: 0 auto;
+	padding: var(--space-lg);
+}
+
+.banner {
+	padding: var(--space-md);
+	border-radius: var(--radius-md);
+	margin-bottom: var(--space-md);
+	font-weight: 700;
+}
+
+.banner--success {
+	background: var(--color-success);
+	color: var(--color-bg);
+}
+
+.banner--error {
+	background: var(--color-danger);
+	color: #1a0505;
+}
+
+.order-form {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-md);
+}
+
+.field {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-xs);
+}
+
+.field span {
+	color: var(--color-text-muted);
+	font-size: 0.9rem;
+}
+
+.field input,
+.item-row input {
+	min-height: var(--touch-target-min);
+	padding: var(--space-sm);
+	border-radius: var(--radius-md);
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-size: 1rem;
+}
+
+.item-row {
+	display: grid;
+	grid-template-columns: 3fr 2fr 1fr;
+	gap: var(--space-sm);
+	margin-bottom: var(--space-sm);
+}
+
+@media (max-width: 600px) {
+	.item-row {
+		grid-template-columns: 1fr;
+	}
+}

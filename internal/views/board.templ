@@ -1,0 +1,28 @@
+package views
+
+import (
+	"print-kds/internal/board"
+	"print-kds/internal/views/components"
+)
+
+templ Board(columns map[string][]board.PrintItem) {
+	@Layout("Print Shop KDS") {
+		<main class="board">
+			@boardColumn("queued", "To Print", columns["queued"])
+			@boardColumn("printing", "On Bed", columns["printing"])
+			@boardColumn("cleaning_qc", "Clean / QC", columns["cleaning_qc"])
+			@boardColumn("ready_to_pack", "Ready to Ship", columns["ready_to_pack"])
+		</main>
+	}
+}
+
+templ boardColumn(status string, heading string, items []board.PrintItem) {
+	<section class="board-column">
+		<h2 class="board-column__heading">{ heading }</h2>
+		<div id={ "column-" + status + "-list" } class="board-column__list">
+			for _, item := range items {
+				@components.Card(item)
+			}
+		</div>
+	</section>
+}
