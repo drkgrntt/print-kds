@@ -1,0 +1,9 @@
+.git
+.gitignore
+.env
+.air.toml
+.serena
+tmp
+data
+*.md
+main

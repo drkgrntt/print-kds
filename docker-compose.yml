@@ -1,0 +1,16 @@
+services:
+  web:
+    build: .
+    container_name: print-kds-web
+    restart: unless-stopped
+    # Postgres stays native on the host, so the container shares the host's
+    # network namespace instead of a bridge network. DB_HOST=localhost in
+    # .env works unchanged and nginx proxies to 127.0.0.1:$PORT.
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - uploads:/app/data/uploads
+
+volumes:
+  uploads:
