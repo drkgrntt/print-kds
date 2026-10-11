@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"print-kds/internal/auth"
+	"print-kds/internal/board"
 	"print-kds/internal/logger"
 	"print-kds/internal/server/middleware"
 	"print-kds/internal/views"
@@ -14,11 +15,12 @@ import (
 )
 
 type UsersController struct {
-	store *auth.Store
+	store     *auth.Store
+	customers *board.Store // for the client-login customer picker
 }
 
-func NewUsersController(store *auth.Store) *UsersController {
-	return &UsersController{store: store}
+func NewUsersController(store *auth.Store, customers *board.Store) *UsersController {
+	return &UsersController{store: store, customers: customers}
 }
 
 // RegisterRoutes registers each route with middleware.RequireAdmin ahead
@@ -39,15 +41,25 @@ func (u *UsersController) handleCreate(c *fiber.Ctx) error {
 	email := strings.TrimSpace(c.FormValue("email"))
 	password := c.FormValue("password")
 	role := auth.Role(c.FormValue("role"))
-	if role != auth.RoleAdmin {
+	if role != auth.RoleAdmin && role != auth.RoleClient {
 		role = auth.RoleStaff
 	}
+	customerID, _ := strconv.ParseInt(c.FormValue("customer_id"), 10, 64)
 
 	if msg := validateNewUser(email, password); msg != "" {
 		return u.render(c, msg)
 	}
 
-	if _, err := u.store.CreateUser(c.Context(), tenantID, email, password, role); err != nil {
+	var err error
+	if role == auth.RoleClient {
+		if customerID == 0 {
+			return u.render(c, "Pick the customer this client login belongs to.")
+		}
+		_, err = u.store.CreateClientUser(c.Context(), tenantID, customerID, email, password)
+	} else {
+		_, err = u.store.CreateUser(c.Context(), tenantID, email, password, role)
+	}
+	if err != nil {
 		if errors.Is(err, auth.ErrDuplicateEmail) {
 			return u.render(c, "That email is already registered.")
 		}
@@ -93,8 +105,14 @@ func (u *UsersController) render(c *fiber.Ctx, errMsg string) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("failed to load users")
 	}
 
+	customers, err := u.customers.ListCustomers(c.Context(), middleware.CurrentTenantID(c))
+	if err != nil {
+		logger.Error("list customers", "error", err)
+	}
+
 	return render(c, views.UsersPage(views.UsersPageData{
 		Users:         users,
+		Customers:     customers,
 		Error:         errMsg,
 		CurrentUserID: middleware.CurrentUserID(c),
 		Layout:        views.LayoutData{TenantName: middleware.CurrentTenantName(c), IsAdmin: true},

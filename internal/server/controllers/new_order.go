@@ -13,7 +13,6 @@ import (
 	"print-kds/internal/views"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/valyala/fasthttp"
 )
 
 // dueDateLayout is the format both <input type="date"> submits and expects
@@ -41,15 +40,35 @@ func (n *NewOrderController) RegisterRoutes(app *fiber.App) {
 	app.Get("/admin/new-order", middleware.RequireAdmin, n.handleForm)
 	app.Post("/admin/new-order", middleware.RequireAdmin, n.handleCreate)
 	app.Get("/admin/new-order/item-row", middleware.RequireAdmin, n.handleItemRow)
+	app.Get("/admin/new-order/ship-to", middleware.RequireAdmin, n.handleShipTo)
 }
 
 func (n *NewOrderController) handleForm(c *fiber.Ctx) error {
+	customers, err := n.store.ListCustomers(c.Context(), middleware.CurrentTenantID(c))
+	if err != nil {
+		logger.Error("list customers", "error", err)
+	}
 	data := views.NewOrderFormData{
 		Items:              blankItemRows(minItemRows),
 		CreatedOrderNumber: c.Query("created"),
+		Customers:          customers,
 	}
 	layout := views.LayoutData{TenantName: middleware.CurrentTenantName(c), IsAdmin: middleware.IsAdmin(c)}
 	return render(c, views.NewOrderForm(data, layout))
+}
+
+// handleShipTo serves the customer select's htmx request: the ship-to
+// fields prefilled from that customer's most recent addressed order (blank
+// for "one-off" or a customer with none). Tenant-scoped like every read.
+func (n *NewOrderController) handleShipTo(c *fiber.Ctx) error {
+	var shipTo board.ShipTo
+	if customerID, _ := strconv.ParseInt(c.Query("customer_id"), 10, 64); customerID != 0 {
+		var err error
+		if shipTo, err = n.store.LastShipTo(c.Context(), middleware.CurrentTenantID(c), customerID); err != nil {
+			logger.Error("load last ship-to", "error", err)
+		}
+	}
+	return render(c, views.ShipToFields(shipTo))
 }
 
 // handleItemRow serves the "+ Add another item" button's htmx request: one
@@ -64,17 +83,26 @@ func (n *NewOrderController) handleItemRow(c *fiber.Ctx) error {
 func (n *NewOrderController) handleCreate(c *fiber.Ctx) error {
 	form := parseNewOrderForm(c)
 	layout := views.LayoutData{TenantName: middleware.CurrentTenantName(c), IsAdmin: middleware.IsAdmin(c)}
+	customers, err := n.store.ListCustomers(c.Context(), middleware.CurrentTenantID(c))
+	if err != nil {
+		logger.Error("list customers", "error", err)
+	}
+	withCustomers := func(msg string) views.NewOrderFormData {
+		d := form.toFormData(msg)
+		d.Customers = customers
+		return d
+	}
 
 	if msg := form.validate(); msg != "" {
-		return render(c, views.NewOrderForm(form.toFormData(msg), layout))
+		return render(c, views.NewOrderForm(withCustomers(msg), layout))
 	}
 
 	if _, err := n.store.CreateOrder(c.Context(), middleware.CurrentTenantID(c), middleware.CurrentUserID(c), form.toNewOrder()); err != nil {
 		if errors.Is(err, board.ErrDuplicateOrderNumber) {
-			return render(c, views.NewOrderForm(form.toFormData(fmt.Sprintf("Order number %q already exists - pick a different one.", form.OrderNumber)), layout))
+			return render(c, views.NewOrderForm(withCustomers(fmt.Sprintf("Order number %q already exists - pick a different one.", form.OrderNumber)), layout))
 		}
 		logger.Error("create order", "error", err)
-		return render(c, views.NewOrderForm(form.toFormData("Something went wrong saving this order - try again."), layout))
+		return render(c, views.NewOrderForm(withCustomers("Something went wrong saving this order - try again."), layout))
 	}
 
 	return c.Redirect(fmt.Sprintf("/admin/new-order?created=%s", form.OrderNumber), fiber.StatusSeeOther)
@@ -85,30 +113,55 @@ func (n *NewOrderController) handleCreate(c *fiber.Ctx) error {
 // input names across every item row rather than indexing them.
 type newOrderForm struct {
 	OrderNumber    string
+	CustomerID     int64
 	CustomerName   string
 	DueDate        string
+	ShipTo         board.ShipTo
 	FileNames      []string
 	ColorMaterials []string
 	Quantities     []string
 }
 
 func parseNewOrderForm(c *fiber.Ctx) newOrderForm {
-	args := c.Context().PostArgs()
+	customerID, _ := strconv.ParseInt(c.FormValue("customer_id"), 10, 64)
 	return newOrderForm{
-		OrderNumber:    strings.TrimSpace(c.FormValue("order_number")),
-		CustomerName:   strings.TrimSpace(c.FormValue("customer_name")),
-		DueDate:        strings.TrimSpace(c.FormValue("due_date")),
-		FileNames:      peekMultiTrimmed(args, "file_name"),
-		ColorMaterials: peekMultiTrimmed(args, "color_material"),
-		Quantities:     peekMultiTrimmed(args, "quantity_required"),
+		OrderNumber:  strings.TrimSpace(c.FormValue("order_number")),
+		CustomerID:   customerID,
+		CustomerName: strings.TrimSpace(c.FormValue("customer_name")),
+		DueDate:      strings.TrimSpace(c.FormValue("due_date")),
+		ShipTo: board.ShipTo{
+			Name:       c.FormValue("ship_name"),
+			Line1:      c.FormValue("ship_line1"),
+			Line2:      c.FormValue("ship_line2"),
+			City:       c.FormValue("ship_city"),
+			State:      c.FormValue("ship_state"),
+			PostalCode: c.FormValue("ship_postal_code"),
+			Country:    c.FormValue("ship_country"),
+		}.Trimmed(),
+		FileNames:      formValuesTrimmed(c, "file_name"),
+		ColorMaterials: formValuesTrimmed(c, "color_material"),
+		Quantities:     formValuesTrimmed(c, "quantity_required"),
 	}
 }
 
-func peekMultiTrimmed(args *fasthttp.Args, key string) []string {
-	raw := args.PeekMulti(key)
+// formValuesTrimmed returns every submitted value for key, in order, for
+// both urlencoded bodies (PostArgs) and multipart bodies (the portal
+// form, which also carries file uploads) - PostArgs is empty for
+// multipart, so the two have to be read differently.
+func formValuesTrimmed(c *fiber.Ctx, key string) []string {
+	var raw []string
+	if strings.HasPrefix(c.Get(fiber.HeaderContentType), fiber.MIMEMultipartForm) {
+		if form, err := c.MultipartForm(); err == nil {
+			raw = form.Value[key]
+		}
+	} else {
+		for _, b := range c.Context().PostArgs().PeekMulti(key) {
+			raw = append(raw, string(b))
+		}
+	}
 	out := make([]string, len(raw))
-	for i, b := range raw {
-		out[i] = strings.TrimSpace(string(b))
+	for i, v := range raw {
+		out[i] = strings.TrimSpace(v)
 	}
 	return out
 }
@@ -143,13 +196,23 @@ func (f newOrderForm) validate() string {
 	switch {
 	case f.OrderNumber == "":
 		return "Order number is required."
-	case f.CustomerName == "":
-		return "Customer name is required."
-	case f.DueDate == "":
-		return "Due date is required."
+	case f.CustomerID == 0 && f.CustomerName == "":
+		return "Pick a customer or enter a customer name."
+	}
+	return f.validateDateAndItems()
+}
+
+// validateDateAndItems is the part of validate shared with the client
+// portal form, where the order number and customer are set server-side.
+func (f newOrderForm) validateDateAndItems() string {
+	if f.DueDate == "" {
+		return "Ship-by date is required."
 	}
 	if _, err := time.Parse(dueDateLayout, f.DueDate); err != nil {
-		return "Due date must be a valid date."
+		return "Ship-by date must be a valid date."
+	}
+	if missing := f.ShipTo.MissingField(); missing != "" {
+		return "Ship-to " + missing + " is required."
 	}
 	if len(f.items()) == 0 {
 		return "Add at least one print item (a file name)."
@@ -164,8 +227,10 @@ func (f newOrderForm) toNewOrder() board.NewOrder {
 	due, _ := time.Parse(dueDateLayout, f.DueDate)
 	return board.NewOrder{
 		OrderNumber:  f.OrderNumber,
+		CustomerID:   f.CustomerID,
 		CustomerName: f.CustomerName,
 		DueDate:      due,
+		ShipTo:       f.ShipTo,
 		Items:        f.items(),
 	}
 }
@@ -192,8 +257,10 @@ func (f newOrderForm) toFormData(errMsg string) views.NewOrderFormData {
 
 	return views.NewOrderFormData{
 		OrderNumber:  f.OrderNumber,
+		CustomerID:   f.CustomerID,
 		CustomerName: f.CustomerName,
 		DueDate:      f.DueDate,
+		ShipTo:       f.ShipTo,
 		Items:        rows,
 		Error:        errMsg,
 	}

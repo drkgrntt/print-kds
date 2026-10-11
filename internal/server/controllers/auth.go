@@ -57,7 +57,7 @@ func (a *AuthController) handleLogin(c *fiber.Ctx) error {
 		return render(c, views.Login(views.LoginFormData{Email: email, Error: "Something went wrong logging in - try again."}))
 	}
 
-	return c.Redirect("/", fiber.StatusSeeOther)
+	return c.Redirect(middleware.HomePath(user.Role), fiber.StatusSeeOther)
 }
 
 func (a *AuthController) handleSignupForm(c *fiber.Ctx) error {

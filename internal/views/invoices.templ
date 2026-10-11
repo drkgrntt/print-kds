@@ -1,0 +1,234 @@
+package views
+
+import (
+	"fmt"
+
+	"print-kds/internal/board"
+)
+
+// Money formats cents as dollars. Currency is assumed USD for now - there
+// is no per-tenant currency setting yet.
+func Money(cents int64) string {
+	sign := ""
+	if cents < 0 {
+		sign = "-"
+		cents = -cents
+	}
+	return fmt.Sprintf("%s$%d.%02d", sign, cents/100, cents%100)
+}
+
+func priceInput(p *int64) string {
+	if p == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d.%02d", *p/100, *p%100)
+}
+
+// InvoicesPageData is /admin/invoices: the batch form, an optional preview
+// of what the batch would invoice (Previewed), and past invoices.
+type InvoicesPageData struct {
+	Invoices   []board.Invoice
+	Customers  []board.Customer
+	From       string
+	To         string
+	CustomerID int64
+	Previewed  bool
+	Candidates []board.InvoiceCandidate
+	Error      string
+	Message    string
+	Layout     LayoutData
+}
+
+func (d InvoicesPageData) previewQuery() string {
+	return fmt.Sprintf("/admin/invoices?from=%s&to=%s&customer_id=%d", d.From, d.To, d.CustomerID)
+}
+
+func (d InvoicesPageData) unpricedCount() int {
+	n := 0
+	for _, c := range d.Candidates {
+		if c.UnitPriceCents == nil {
+			n++
+		}
+	}
+	return n
+}
+
+templ InvoicesPage(data InvoicesPageData) {
+	@Layout("Invoices - Print Shop KDS", data.Layout) {
+		<main class="intake intake--wide">
+			<h1>Invoices</h1>
+			if data.Error != "" {
+				<p class="banner banner--error">{ data.Error }</p>
+			}
+			if data.Message != "" {
+				<p class="banner banner--success">{ data.Message }</p>
+			}
+			<h2>Batch invoice shipped work</h2>
+			<form method="get" action="/admin/invoices" class="order-form">
+				<label class="field">
+					<span>Shipped from</span>
+					<input type="date" name="from" value={ data.From } required/>
+				</label>
+				<label class="field">
+					<span>Shipped through</span>
+					<input type="date" name="to" value={ data.To } required/>
+				</label>
+				<label class="field">
+					<span>Customer</span>
+					<select name="customer_id">
+						<option value="0">All customers</option>
+						for _, c := range data.Customers {
+							<option value={ fmt.Sprint(c.ID) } selected?={ c.ID == data.CustomerID }>{ c.Name }</option>
+						}
+					</select>
+				</label>
+				<button type="submit" class="btn btn--primary">Preview</button>
+			</form>
+			if data.Previewed {
+				<h2>Preview</h2>
+				if len(data.Candidates) == 0 {
+					<p>Nothing to invoice in this range - items must be packed and shipped, and not already invoiced.</p>
+				} else {
+					<table class="users-table">
+						<thead>
+							<tr>
+								<th>Customer</th>
+								<th>Order</th>
+								<th>Item</th>
+								<th>Shipped</th>
+								<th>Qty</th>
+								<th>Unit price ($)</th>
+							</tr>
+						</thead>
+						<tbody>
+							for _, c := range data.Candidates {
+								<tr>
+									<td>{ c.CustomerName }</td>
+									<td>{ c.OrderNumber }</td>
+									<td>{ c.Description }</td>
+									<td>{ c.ShippedAt.Format("Jan 2") }</td>
+									<td>{ fmt.Sprint(c.Quantity) }</td>
+									<td>
+										<form method="post" action={ templ.SafeURL(fmt.Sprintf("/admin/invoices/items/%d/price", c.ItemID)) } class="price-form">
+											<input type="hidden" name="from" value={ data.From }/>
+											<input type="hidden" name="to" value={ data.To }/>
+											<input type="hidden" name="customer_id" value={ fmt.Sprint(data.CustomerID) }/>
+											<input type="number" name="price" min="0" step="0.01" value={ priceInput(c.UnitPriceCents) } placeholder="price" required/>
+											<button type="submit" class="btn btn--secondary">Save</button>
+										</form>
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+					if data.unpricedCount() > 0 {
+						<p class="banner banner--error">{ fmt.Sprintf("%d item(s) have no price and will be left out of the batch until priced.", data.unpricedCount()) }</p>
+					}
+					<form method="post" action="/admin/invoices" class="order-form">
+						<input type="hidden" name="from" value={ data.From }/>
+						<input type="hidden" name="to" value={ data.To }/>
+						<input type="hidden" name="customer_id" value={ fmt.Sprint(data.CustomerID) }/>
+						<button type="submit" class="btn btn--primary">Create invoices (one per customer)</button>
+					</form>
+				}
+			}
+			<h2>Past invoices</h2>
+			if len(data.Invoices) == 0 {
+				<p>No invoices yet.</p>
+			} else {
+				<table class="users-table">
+					<thead>
+						<tr>
+							<th>#</th>
+							<th>Customer</th>
+							<th>Period</th>
+							<th>Total</th>
+							<th>Created</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, inv := range data.Invoices {
+							<tr>
+								<td><a href={ templ.SafeURL(fmt.Sprintf("/admin/invoices/%d", inv.ID)) }>{ fmt.Sprintf("INV-%04d", inv.Number) }</a></td>
+								<td>{ inv.CustomerName }</td>
+								<td>{ inv.PeriodStart.Format("Jan 2") } - { inv.PeriodEnd.Format("Jan 2, 2006") }</td>
+								<td>{ Money(inv.TotalCents) }</td>
+								<td>{ inv.CreatedAt.Format("2006-01-02") }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</main>
+	}
+}
+
+// InvoicePage is the printable invoice: its own light, print-friendly
+// document (no app bar, no dark theme) - save as PDF from the browser's
+// print dialog.
+templ InvoicePage(inv board.Invoice, shopName string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="UTF-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ fmt.Sprintf("Invoice INV-%04d", inv.Number) }</title>
+			<link rel="stylesheet" href="/static/css/invoice.css"/>
+		</head>
+		<body>
+			<main class="invoice">
+				<p class="invoice__noprint"><a href="/admin/invoices">&larr; All invoices</a> <button type="button" onclick="window.print()">Print / Save as PDF</button></p>
+				<header class="invoice__header">
+					<div>
+						<h1>{ shopName }</h1>
+						<p>Invoice { fmt.Sprintf("INV-%04d", inv.Number) }</p>
+					</div>
+					<div class="invoice__meta">
+						<p>Date: { inv.CreatedAt.Format("Jan 2, 2006") }</p>
+						<p>Work shipped: { inv.PeriodStart.Format("Jan 2") } - { inv.PeriodEnd.Format("Jan 2, 2006") }</p>
+					</div>
+				</header>
+				<section class="invoice__billto">
+					<h2>Bill to</h2>
+					<p>{ inv.CustomerName }</p>
+					if inv.CustomerBillingAddress != "" {
+						<p>{ inv.CustomerBillingAddress }</p>
+					}
+					if inv.CustomerEmail != "" {
+						<p>{ inv.CustomerEmail }</p>
+					}
+				</section>
+				<table class="invoice__lines">
+					<thead>
+						<tr>
+							<th>Order</th>
+							<th>Description</th>
+							<th>Shipped</th>
+							<th class="num">Qty</th>
+							<th class="num">Unit price</th>
+							<th class="num">Amount</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, l := range inv.Lines {
+							<tr>
+								<td>{ l.OrderNumber }</td>
+								<td>{ l.Description }</td>
+								<td>{ l.ShippedAt.Format("Jan 2") }</td>
+								<td class="num">{ fmt.Sprint(l.Quantity) }</td>
+								<td class="num">{ Money(l.UnitPriceCents) }</td>
+								<td class="num">{ Money(l.LineTotalCents) }</td>
+							</tr>
+						}
+					</tbody>
+					<tfoot>
+						<tr>
+							<td colspan="5" class="num">Total</td>
+							<td class="num">{ Money(inv.TotalCents) }</td>
+						</tr>
+					</tfoot>
+				</table>
+			</main>
+		</body>
+	</html>
+}

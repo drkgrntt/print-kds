@@ -35,12 +35,60 @@ responses, so it sets `HX-Redirect: /login` and returns `200` instead;
 htmx follows that as a full-page navigation client-side. See
 `internal/server/middleware/auth.go`.
 
-`middleware.RequireAdmin` gates the two admin-only areas -
-`NewOrderController` (order intake) and `UsersController`
-(`/admin/users`) each apply it directly to their own routes, right after
-`RequireAuth` in the chain - a `staff` user gets a `403`. Every other
-route (the board itself, every print-item transition) is open to any
-logged-in user regardless of role.
+`middleware.RequireAdmin` gates the admin-only areas -
+`NewOrderController` (order intake), `UsersController` (`/admin/users`)
+and `CustomersController` (`/admin/customers`) each apply it directly to
+their own routes, right after `RequireAuth` in the chain - a `staff` or
+`client` user gets a `403`.
+
+There's a third role, `client` (a customer's portal login; its session
+also carries `customer_id`, read back via `middleware.CurrentCustomerID`).
+`middleware.RequireStaff` gates the board and its transition/history/files
+routes to admin and staff - a client's plain page load there redirects to
+`/portal`, anything else is a `403` - and `middleware.RequireClient` gates
+`/portal/*` to clients. After login a client lands on `/portal`
+(`middleware.HomePath`).
+
+### Ship-to address
+
+Every new order carries a ship-to address (`board.ShipTo`, stored as JSON in
+the existing `orders.shipping_address` column - no migration). Both order
+forms share the `views.ShipToFields` block (`ship_*` fields, parsed in
+`parseNewOrderForm`); `newOrderForm.validateDateAndItems` requires
+recipient, street, city, state and postal code. `itemColumns` selects the
+column, so every `PrintItem` carries its order's address and a card shows
+it in the `ready_to_pack` column, where the packer needs it. Orders created
+before this have `'{}'` and show nothing.
+
+Repeat orders are prefilled: `board.Store.LastShipTo` returns the address
+from a customer's most recent addressed order (tenant- and customer-scoped,
+no extra column). The portal form loads it for the session's customer; on
+the admin form, changing the customer select fires an htmx `GET
+/admin/new-order/ship-to?customer_id=N` that swaps in the prefilled
+`ShipToFields` (blank for a one-off customer) - note this replaces whatever
+was typed in the address block.
+
+### Client portal and uploads
+
+`PortalController` serves `/portal` (the customer's order list),
+`/portal/new-order` (multipart form), and `/portal/files/:id`. Every
+handler scopes by the session's tenant *and* customer - the customer id
+is never read from a form or URL (the portal handler overwrites any
+submitted `customer_id` with the session's). `board.Store.CreateOrder`
+verifies a non-zero `CustomerID` belongs to the tenant and copies its name
+into `orders.customer_name`. Client orders get a generated order number
+(`WEB-<date>-<hex>`).
+
+Uploads (`saveUploads`, `controllers/uploads.go`) are written to
+`UPLOAD_DIR/<tenant_id>/<random><ext>` - outside `web/static`, which is
+public - after an extension allowlist check, and recorded in
+`order_files` inside the same transaction as the order; if the insert
+fails the files are removed. Downloads go through `GetOrderFile`, which
+joins `orders` for the tenant check (and the customer check for clients);
+a miss is a `404`. Staff download via `/files/:id` (`RequireStaff`), linked
+from a card's `[ FILES ]` toggle (`GET /orders/:id/files`, an htmx
+read-only fragment like `[ HISTORY ]`). The request body limit is
+`MAX_UPLOAD_MB`.
 
 `/login` and `/signup` (`controllers.AuthController`) are the only public,
 unauthenticated routes besides static/health. `/signup` creates a
@@ -337,6 +385,31 @@ tool for that anymore. `newQuantityRequired` must be at least 1 -
 really `CANCEL`, not a quantity edit. The board's `queued` column shows a
 small inline quantity field (`UPDATE QTY`) next to the printer-assignment
 form for this - see `internal/views/components/card.templ`.
+
+## Batched invoicing
+
+`InvoicesController` (`/admin/invoices`, all `RequireAdmin`) wraps three
+`board.Store` methods in `internal/board/invoices.go`. **Invoiceable**
+means: `print_items.status = 'packed'`, with a shipment whose `shipped_at`
+(`MAX` across the item's `shipment_items`) falls in the inclusive date
+range, on an order linked to a customer, and with no `invoice_lines` row
+yet. This is per item, not per order, so a partially shipped order bills
+only what has shipped, and cancelled items (never `packed`) are excluded.
+`candidateQuery` is shared by `PreviewBatch` (read-only) and `CreateBatch`.
+
+`CreateBatch` runs in one transaction: it selects the candidates
+`FOR UPDATE OF pi`, skips unpriced items (counted in `BatchResult.Unpriced`
+so they remain for a later batch), allocates an invoice number per
+customer from `tenants.next_invoice_number`, and inserts the invoice plus
+snapshot lines. `invoice_lines.print_item_id` is `UNIQUE`, so two
+concurrent submissions can't both invoice an item - the loser gets
+`ErrItemInvoiced` and rolls back. `SetItemPrice` refuses an already
+invoiced item and is tenant-scoped through the item's order.
+
+The printable page (`views.InvoicePage`) is its own light-themed document
+using `web/static/css/invoice.css` (with `@media print`), not the dark
+`Layout`; PDF output is the browser's print dialog, no server-side PDF
+library.
 
 ## Layout
 

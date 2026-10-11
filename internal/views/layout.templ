@@ -6,6 +6,7 @@ package views
 type LayoutData struct {
 	TenantName string
 	IsAdmin    bool
+	IsClient   bool
 }
 
 templ Layout(title string, data LayoutData) {
@@ -14,8 +15,8 @@ templ Layout(title string, data LayoutData) {
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
-			<link rel="icon" href="/static/favicon.svg" type="image/svg+xml"/>
 			<title>{ title }</title>
+			<link rel="icon" href="/static/favicon.svg" type="image/svg+xml"/>
 			<link rel="stylesheet" href="/static/css/tokens.css"/>
 			<link rel="stylesheet" href="/static/css/base.css"/>
 			<link rel="stylesheet" href="/static/css/board.css"/>
@@ -23,13 +24,23 @@ templ Layout(title string, data LayoutData) {
 		</head>
 		<body>
 			<header class="app-bar">
-				<a href="/" class="app-bar__title">Print Shop KDS</a>
+				if data.IsClient {
+					<a href="/portal" class="app-bar__title">Print Shop KDS</a>
+				} else {
+					<a href="/" class="app-bar__title">Print Shop KDS</a>
+				}
 				if data.TenantName != "" {
 					<div class="app-bar__actions">
 						<span class="app-bar__tenant">{ data.TenantName }</span>
 						if data.IsAdmin {
 							<a href="/admin/new-order" class="app-bar__link">+ New Order</a>
+							<a href="/admin/customers" class="app-bar__link">Customers</a>
+							<a href="/admin/invoices" class="app-bar__link">Invoices</a>
 							<a href="/admin/users" class="app-bar__link">Users</a>
+						}
+						if data.IsClient {
+							<a href="/portal" class="app-bar__link">My Orders</a>
+							<a href="/portal/new-order" class="app-bar__link">+ Place Order</a>
 						}
 						<form method="post" action="/logout" class="app-bar__logout-form">
 							<button type="submit" class="app-bar__link-button">Log Out</button>

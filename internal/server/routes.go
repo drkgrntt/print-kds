@@ -27,7 +27,12 @@ func (s *FiberServer) RegisterFiberRoutes() {
 	// with middleware.RequireAdmin - order intake and user management are
 	// admin-only, the board itself is open to any logged-in user.
 	controllers.NewNewOrderController(s.boardStore).RegisterRoutes(s.App)
-	controllers.NewUsersController(s.authStore).RegisterRoutes(s.App)
+	controllers.NewUsersController(s.authStore, s.boardStore).RegisterRoutes(s.App)
+	controllers.NewCustomersController(s.boardStore).RegisterRoutes(s.App)
+	controllers.NewInvoicesController(s.boardStore).RegisterRoutes(s.App)
+	// The client portal gates its own routes with middleware.RequireClient;
+	// /files/:id (staff download) with RequireStaff.
+	controllers.NewPortalController(s.boardStore, s.uploadDir).RegisterRoutes(s.App)
 
 	logger.Info("routes registered")
 }

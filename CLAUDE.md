@@ -10,10 +10,11 @@ floor: a shared board, meant to run full-screen on a touchscreen or
 tablet in the print room, tracking each print item from queue through
 printing, cleaning/QC, packing, and shipment. It's multi-tenant: one
 shared instance/database serves many shops, each behind a login, isolated
-by `orders.tenant_id` (see `internal/board.Store.beginItemTxAny`). Two
-roles - `admin` (order intake, user management) and `staff` (board
-operation only) - gate `/admin/*` routes; see `internal/auth` and
-`internal/server/middleware/auth.go`. See `README.md` for the full feature
+by `orders.tenant_id` (see `internal/board.Store.beginItemTxAny`). Three
+roles - `admin` (order intake, customers, user management), `staff` (board
+operation only) and `client` (a customer's portal login at `/portal`,
+scoped to one `customers` row) - gate `/admin/*`, the board and
+`/portal/*`; see `internal/auth` and `internal/server/middleware/auth.go`. See `README.md` for the full feature
 rundown and `docs/architecture.md` / `docs/schema.md` for the technical
 detail behind the board and its data model.
 
@@ -112,7 +113,8 @@ creates a brand-new tenant. `internal/` is split by concern:
 - `internal/auth` — tenants/users/sessions: `Store.SignUp` (new tenant +
   first admin user), `Authenticate`, `CreateSession`/`ValidateSession`/
   `DeleteSession` (opaque token, hashed before storage), and
-  `ListUsers`/`CreateUser`/`DeleteUser` for admin-driven user management.
+  `ListUsers`/`CreateUser`/`CreateClientUser`/`DeleteUser` for admin-driven
+  user management.
 - `internal/database` — connection setup + goose migrations, embedded from
   `internal/database/migrations/*.sql` and run automatically on every
   startup (`database.New()` calls `migrate()` — no separate migrate step).

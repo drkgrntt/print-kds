@@ -1,0 +1,66 @@
+/* Printable invoice (/admin/invoices/:id). Deliberately light and
+   self-contained - the rest of the app is a dark shop-floor theme that
+   would print as a wall of ink. */
+
+:root { color-scheme: light; }
+
+body {
+	margin: 0;
+	background: #fff;
+	color: #111;
+	font: 16px/1.4 system-ui, sans-serif;
+}
+
+.invoice {
+	max-width: 800px;
+	margin: 0 auto;
+	padding: 24px;
+}
+
+.invoice__noprint button {
+	min-height: 48px;
+	margin-left: 16px;
+	padding: 0 16px;
+	font-size: 1rem;
+}
+
+.invoice__header {
+	display: flex;
+	justify-content: space-between;
+	gap: 24px;
+	margin: 24px 0;
+}
+
+.invoice__header h1 { margin: 0 0 4px; }
+.invoice__header p,
+.invoice__billto p { margin: 2px 0; }
+.invoice__meta { text-align: right; }
+
+.invoice__billto h2 {
+	font-size: 0.9rem;
+	text-transform: uppercase;
+	color: #555;
+	margin: 0 0 4px;
+}
+
+.invoice__lines {
+	width: 100%;
+	border-collapse: collapse;
+	margin-top: 24px;
+}
+
+.invoice__lines th,
+.invoice__lines td {
+	text-align: left;
+	padding: 8px;
+	border-bottom: 1px solid #ccc;
+}
+
+.invoice__lines .num { text-align: right; }
+.invoice__lines tfoot td { font-weight: 700; border-bottom: 0; }
+
+@media print {
+	.invoice__noprint { display: none; }
+	.invoice { padding: 0; }
+	@page { margin: 16mm; }
+}

@@ -28,6 +28,10 @@ var ErrNotFound = errors.New("print item not found")
 // constraint-violation error.
 var ErrDuplicateOrderNumber = errors.New("order number already exists")
 
+// ErrCustomerNotFound is returned when a customer id doesn't exist in the
+// caller's tenant.
+var ErrCustomerNotFound = errors.New("customer not found")
+
 // ErrInvalidQuantity is wrapped into the error RecordQCResult returns when
 // quantityPassed falls outside [0, quantity_required] for the item -
 // callers use this to show a 400 instead of the 409 a status conflict
@@ -53,7 +57,12 @@ type PrintItem struct {
 
 	OrderNumber  string
 	CustomerName string
-	DueDate      time.Time
+	DueDate      time.Time // the order's ship-by date
+	// OrderCreatedAt is when the order was placed; FileCount is how many
+	// uploaded files it carries (see ListOrderFiles).
+	OrderCreatedAt time.Time
+	FileCount      int
+	ShipTo         ShipTo
 
 	// LastUpdatedByEmail is the email of whoever most recently ran a
 	// transition on this item - "" until its first transition, or if
@@ -99,7 +108,8 @@ const itemColumns = `
 	pi.id, pi.order_id, pi.file_name, pi.color_material, pi.quantity_required,
 	pi.quantity_completed, pi.status, pi.assigned_printer, pi.qc_failure_reason,
 	pi.reprint_count, pi.created_at, pi.status_changed_at,
-	o.order_number, o.customer_name, o.due_date, u.email`
+	o.order_number, o.customer_name, o.due_date, o.created_at, o.shipping_address,
+	(SELECT count(*) FROM order_files f WHERE f.order_id = o.id), u.email`
 
 // itemJoins must accompany every query built on itemColumns - it resolves
 // u.email (last_updated_by's display name) alongside the orders join
@@ -110,16 +120,18 @@ LEFT JOIN users u ON u.id = pi.last_updated_by`
 
 func scanItem(row interface{ Scan(...any) error }, item *PrintItem) error {
 	var lastUpdatedByEmail sql.NullString
+	var shipTo []byte
 	if err := row.Scan(
 		&item.ID, &item.OrderID, &item.FileName, &item.ColorMaterial,
 		&item.QuantityRequired, &item.QuantityCompleted, &item.Status, &item.AssignedPrinter,
 		&item.QCFailureReason, &item.ReprintCount,
 		&item.CreatedAt, &item.StatusChangedAt, &item.OrderNumber, &item.CustomerName, &item.DueDate,
-		&lastUpdatedByEmail,
+		&item.OrderCreatedAt, &shipTo, &item.FileCount, &lastUpdatedByEmail,
 	); err != nil {
 		return err
 	}
 	item.LastUpdatedByEmail = lastUpdatedByEmail.String
+	item.ShipTo = parseShipTo(shipTo)
 	return nil
 }
 
@@ -241,12 +253,28 @@ type NewOrderItem struct {
 	QuantityRequired int
 }
 
-// NewOrder is the manual order-intake form's input to CreateOrder.
+// NewOrderFile is one uploaded file already written to disk; CreateOrder
+// only records its metadata (see order_files).
+type NewOrderFile struct {
+	Filename    string
+	StoredPath  string
+	SizeBytes   int64
+	ContentType string
+}
+
+// NewOrder is the order-intake input to CreateOrder - from the admin
+// intake form or a client's portal order. When CustomerID is non-zero it
+// must belong to the tenant, and the order's customer_name is taken from
+// that customer (CustomerName is ignored); with CustomerID 0 the
+// free-text CustomerName is used and the order has no customer link.
 type NewOrder struct {
 	OrderNumber  string
+	CustomerID   int64
 	CustomerName string
 	DueDate      time.Time
+	ShipTo       ShipTo
 	Items        []NewOrderItem
+	Files        []NewOrderFile
 }
 
 // CreateOrder inserts a new order and its print items (all starting
@@ -262,11 +290,31 @@ func (s *Store) CreateOrder(ctx context.Context, tenantID, userID int64, in NewO
 	}
 	defer tx.Rollback()
 
+	customerName := in.CustomerName
+	var customerID sql.NullInt64
+	if in.CustomerID != 0 {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT name FROM customers WHERE id = $1 AND tenant_id = $2`,
+			in.CustomerID, tenantID,
+		).Scan(&customerName); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, ErrCustomerNotFound
+			}
+			return 0, fmt.Errorf("load customer %d: %w", in.CustomerID, err)
+		}
+		customerID = sql.NullInt64{Int64: in.CustomerID, Valid: true}
+	}
+
+	shipTo, err := in.ShipTo.marshal()
+	if err != nil {
+		return 0, fmt.Errorf("encode ship-to address: %w", err)
+	}
+
 	var orderID int64
 	err = tx.QueryRowContext(ctx, `
-INSERT INTO orders (tenant_id, order_number, customer_name, shipping_address, due_date, status)
-VALUES ($1, $2, $3, '{}', $4, 'pending')
-RETURNING id`, tenantID, in.OrderNumber, in.CustomerName, in.DueDate).Scan(&orderID)
+INSERT INTO orders (tenant_id, order_number, customer_id, customer_name, shipping_address, due_date, status)
+VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+RETURNING id`, tenantID, in.OrderNumber, customerID, customerName, shipTo, in.DueDate).Scan(&orderID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -286,6 +334,14 @@ RETURNING id`, orderID, item.FileName, item.ColorMaterial, qty, userID).Scan(&it
 		}
 		if err := recordEvent(ctx, tx, itemID, userID, "", "queued", ""); err != nil {
 			return 0, err
+		}
+	}
+
+	for _, f := range in.Files {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO order_files (order_id, filename, stored_path, size_bytes, content_type)
+VALUES ($1, $2, $3, $4, $5)`, orderID, f.Filename, f.StoredPath, f.SizeBytes, f.ContentType); err != nil {
+			return 0, fmt.Errorf("insert order file %s: %w", f.Filename, err)
 		}
 	}
 

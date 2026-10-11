@@ -1,5 +1,11 @@
 package views
 
+import (
+	"fmt"
+
+	"print-kds/internal/board"
+)
+
 // NewOrderItemRow is one print-item row's typed values, echoed back as-is
 // on a validation error so re-submitting the form doesn't lose what was
 // already typed.
@@ -14,8 +20,11 @@ type NewOrderItemRow struct {
 // message (never both at once).
 type NewOrderFormData struct {
 	OrderNumber        string
+	CustomerID         int64
 	CustomerName       string
+	Customers          []board.Customer
 	DueDate            string
+	ShipTo             board.ShipTo
 	Items              []NewOrderItemRow
 	Error              string
 	CreatedOrderNumber string
@@ -37,13 +46,26 @@ templ NewOrderForm(data NewOrderFormData, layout LayoutData) {
 					<input type="text" name="order_number" value={ data.OrderNumber } required/>
 				</label>
 				<label class="field">
-					<span>Customer name</span>
-					<input type="text" name="customer_name" value={ data.CustomerName } required/>
+					<span>Customer</span>
+					<select name="customer_id" hx-get="/admin/new-order/ship-to" hx-trigger="change" hx-target="#ship-to-fields" hx-swap="innerHTML">
+						<option value="0">One-off customer (enter a name below)</option>
+						for _, c := range data.Customers {
+							<option value={ fmt.Sprint(c.ID) } selected?={ c.ID == data.CustomerID }>{ c.Name }</option>
+						}
+					</select>
 				</label>
 				<label class="field">
-					<span>Due date</span>
+					<span>One-off customer name</span>
+					<input type="text" name="customer_name" value={ data.CustomerName }/>
+				</label>
+				<label class="field">
+					<span>Ship-by date</span>
 					<input type="date" name="due_date" value={ data.DueDate } required/>
 				</label>
+				<h2>Ship to</h2>
+				<div id="ship-to-fields" class="ship-to">
+					@ShipToFields(data.ShipTo)
+				</div>
 				<h2>Print items</h2>
 				<div id="item-rows">
 					for _, row := range data.Items {
@@ -57,10 +79,46 @@ templ NewOrderForm(data NewOrderFormData, layout LayoutData) {
 	}
 }
 
+// ShipToFields is the ship-to address block shared by the admin intake
+// form and the client portal form (field names ship_*, read back by
+// parseNewOrderForm).
+templ ShipToFields(a board.ShipTo) {
+	<label class="field">
+		<span>Recipient name</span>
+		<input type="text" name="ship_name" value={ a.Name } autocomplete="name" required/>
+	</label>
+	<label class="field">
+		<span>Street address</span>
+		<input type="text" name="ship_line1" value={ a.Line1 } autocomplete="address-line1" required/>
+	</label>
+	<label class="field">
+		<span>Apt / suite (optional)</span>
+		<input type="text" name="ship_line2" value={ a.Line2 } autocomplete="address-line2"/>
+	</label>
+	<div class="ship-to-row">
+		<label class="field">
+			<span>City</span>
+			<input type="text" name="ship_city" value={ a.City } autocomplete="address-level2" required/>
+		</label>
+		<label class="field">
+			<span>State</span>
+			<input type="text" name="ship_state" value={ a.State } autocomplete="address-level1" required/>
+		</label>
+		<label class="field">
+			<span>Postal code</span>
+			<input type="text" name="ship_postal_code" value={ a.PostalCode } autocomplete="postal-code" required/>
+		</label>
+	</div>
+	<label class="field">
+		<span>Country (optional)</span>
+		<input type="text" name="ship_country" value={ a.Country } autocomplete="country-name"/>
+	</label>
+}
+
 templ ItemRow(row NewOrderItemRow) {
 	<div class="item-row">
 		<input type="text" name="file_name" placeholder="File name (e.g. bracket_v2.gcode)" value={ row.FileName }/>
-		<input type="text" name="color_material" placeholder="Color / material" value={ row.ColorMaterial }/>
+		<input type="text" name="color_material" placeholder="Color" value={ row.ColorMaterial }/>
 		<input type="number" name="quantity_required" placeholder="Qty" min="1" value={ row.Quantity }/>
 	</div>
 }

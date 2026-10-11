@@ -1,0 +1,101 @@
+package views
+
+import (
+	"fmt"
+
+	"print-kds/internal/board"
+)
+
+// PortalPageData is a client's order list (/portal).
+type PortalPageData struct {
+	Orders       []board.CustomerOrder
+	CreatedOrder string
+	Layout       LayoutData
+}
+
+templ PortalPage(data PortalPageData) {
+	@Layout("My Orders - Print Shop KDS", data.Layout) {
+		<main class="intake intake--wide">
+			<h1>My orders</h1>
+			if data.CreatedOrder != "" {
+				<p class="banner banner--success">Order { data.CreatedOrder } placed - the shop will start on it soon.</p>
+			}
+			if len(data.Orders) == 0 {
+				<p>No orders yet. <a href="/portal/new-order">Place your first order</a>.</p>
+			} else {
+				<table class="users-table">
+					<thead>
+						<tr>
+							<th>Order</th>
+							<th>Status</th>
+							<th>Placed</th>
+							<th>Ship by</th>
+							<th>Items</th>
+							<th>Files</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, o := range data.Orders {
+							<tr>
+								<td>{ o.OrderNumber }</td>
+								<td>{ o.Status }</td>
+								<td>{ o.CreatedAt.Format("2006-01-02") }</td>
+								<td>{ o.DueDate.Format("2006-01-02") }</td>
+								<td>{ fmt.Sprint(o.ItemCount) }</td>
+								<td>{ fmt.Sprint(o.FileCount) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</main>
+	}
+}
+
+// PortalNewOrderData is the client order form. Placed is today's date,
+// shown read-only - created_at is always set server-side.
+type PortalNewOrderData struct {
+	ShipBy string
+	ShipTo board.ShipTo
+	Placed string
+	Items  []NewOrderItemRow
+	Error  string
+	Layout LayoutData
+}
+
+templ PortalNewOrder(data PortalNewOrderData) {
+	@Layout("Place an Order - Print Shop KDS", data.Layout) {
+		<main class="intake">
+			<h1>Place an order</h1>
+			if data.Error != "" {
+				<p class="banner banner--error">{ data.Error }</p>
+			}
+			<form method="post" action="/portal/new-order" enctype="multipart/form-data" class="order-form">
+				<label class="field">
+					<span>Order date</span>
+					<input type="text" value={ data.Placed } disabled/>
+				</label>
+				<label class="field">
+					<span>Ship-by date</span>
+					<input type="date" name="due_date" value={ data.ShipBy } required/>
+				</label>
+				<label class="field">
+					<span>Model files (.stl, .3mf, .obj, .step, .gcode, .zip) - pick one or more</span>
+					<input type="file" name="files" multiple accept=".stl,.3mf,.obj,.step,.stp,.gcode,.zip"/>
+				</label>
+				<h2>Ship to</h2>
+				<div class="ship-to">
+					@ShipToFields(data.ShipTo)
+				</div>
+				<h2>Print items</h2>
+				<div id="item-rows">
+					for _, row := range data.Items {
+						@ItemRow(row)
+					}
+				</div>
+				<button type="button" class="btn" hx-get="/portal/new-order/item-row" hx-target="#item-rows" hx-swap="beforeend">+ Add another item</button>
+				<button type="submit" class="btn btn--primary">Place order</button>
+			</form>
+		</main>
+	}
+}

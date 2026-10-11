@@ -84,3 +84,42 @@
 		grid-template-columns: 1fr;
 	}
 }
+
+.ship-to {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-md);
+}
+
+/* Ship-to city/state/postal on one row (stacks on narrow screens) */
+.ship-to-row {
+	display: grid;
+	grid-template-columns: 3fr 1.5fr 2fr;
+	gap: var(--space-sm);
+}
+
+@media (max-width: 600px) {
+	.ship-to-row {
+		grid-template-columns: 1fr;
+	}
+}
+
+/* Invoice batch preview (/admin/invoices) */
+.intake--wide { max-width: 960px; }
+
+.price-form {
+	display: flex;
+	gap: var(--space-sm);
+	align-items: center;
+}
+
+.price-form input[type="number"] {
+	min-height: var(--touch-target-min);
+	width: 7rem;
+	padding: var(--space-sm);
+	border-radius: var(--radius-md);
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text);
+	font-size: 1rem;
+}

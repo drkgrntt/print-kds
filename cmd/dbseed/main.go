@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	"print-kds/internal/database"
@@ -118,7 +119,14 @@ func main() {
 	}
 
 	fmt.Printf("\nSeeding complete: %d order(s) created, %d already existed.\n", applied, skipped)
+	if err := seedShippedOrders(ctx, db, tenantID); err != nil {
+		logger.Fatal("seed shipped orders", "error", err)
+	}
+	if err := ensureSeedClient(ctx, db, tenantID); err != nil {
+		logger.Fatal("ensure seed client", "error", err)
+	}
 	fmt.Printf("Log in at / with %s / %s\n", seedUserEmail, seedUserPassword)
+	fmt.Printf("Client portal login (/portal, customer %q): %s / %s\n", seedClientCustomer, seedClientEmail, seedUserPassword)
 }
 
 // ensureSeedTenant looks up (or creates) the "Seed Shop" tenant dbseed's
@@ -182,13 +190,22 @@ func seedOneOrder(ctx context.Context, db *sql.DB, tenantID int64, o seedOrder) 
 	}
 	defer tx.Rollback()
 
+	var customerID int64
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO customers (tenant_id, name) VALUES ($1, $2)
+		ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
+		RETURNING id
+	`, tenantID, o.customerName).Scan(&customerID); err != nil {
+		return false, fmt.Errorf("ensure customer %q: %w", o.customerName, err)
+	}
+
 	var orderID int64
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO orders (tenant_id, order_number, customer_name, shipping_address, due_date, status)
-		VALUES ($1, $2, $3, '{}', CURRENT_DATE + $4::int, 'pending')
+		INSERT INTO orders (tenant_id, order_number, customer_id, customer_name, shipping_address, due_date, status)
+		VALUES ($1, $2, $3, $4, $6::jsonb, CURRENT_DATE + $5::int, 'pending')
 		ON CONFLICT (tenant_id, order_number) DO NOTHING
 		RETURNING id
-	`, tenantID, o.orderNumber, o.customerName, o.dueInDays).Scan(&orderID)
+	`, tenantID, o.orderNumber, customerID, o.customerName, o.dueInDays, seedShipTo(o.customerName)).Scan(&orderID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -210,4 +227,112 @@ func seedOneOrder(ctx context.Context, db *sql.DB, tenantID int64, o seedOrder) 
 	}
 
 	return true, nil
+}
+
+const (
+	seedClientEmail    = "client@example.com"
+	seedClientCustomer = "Alice Nguyen"
+)
+
+// ensureSeedClient idempotently provisions a client-portal login for one
+// of the seeded customers (same password as the dev admin login).
+func ensureSeedClient(ctx context.Context, db *sql.DB, tenantID int64) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(seedUserPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash seed client password: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO users (tenant_id, email, password_hash, role, customer_id)
+		SELECT $1, $2, $3, 'client', c.id FROM customers c WHERE c.tenant_id = $1 AND c.name = $4
+		ON CONFLICT (email) DO NOTHING
+	`, tenantID, seedClientEmail, string(hash), seedClientCustomer); err != nil {
+		return fmt.Errorf("insert seed client: %w", err)
+	}
+	return nil
+}
+
+// shippedSeed is an already-packed-and-shipped order, back-dated so a
+// "past 2 weeks" invoice batch has something to pick up (and something -
+// the 30-day-old one - to leave out). priceCents nil leaves the item
+// unpriced.
+type shippedSeed struct {
+	orderNumber  string
+	customerName string
+	daysAgo      int
+	quantity     int
+	priceCents   *int64
+}
+
+func ptr(v int64) *int64 { return &v }
+
+var shippedSeeds = []shippedSeed{
+	{"SEED-S1", "Alice Nguyen", 2, 4, ptr(1250)},
+	{"SEED-S2", "Alice Nguyen", 9, 1, ptr(4000)},
+	{"SEED-S3", "Ben Ortiz", 5, 10, ptr(300)},
+	{"SEED-S4", "Ben Ortiz", 12, 2, nil},
+	{"SEED-S5", "Alice Nguyen", 30, 3, ptr(1250)},
+}
+
+// seedShippedOrders inserts shipped orders (packed item + shipment) over
+// the last month. Skipped per order if its order number already exists.
+func seedShippedOrders(ctx context.Context, db *sql.DB, tenantID int64) error {
+	for _, o := range shippedSeeds {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin transaction: %w", err)
+		}
+		if err := func() error {
+			defer tx.Rollback()
+			var customerID int64
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO customers (tenant_id, name) VALUES ($1, $2)
+				ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
+				RETURNING id`, tenantID, o.customerName).Scan(&customerID); err != nil {
+				return fmt.Errorf("ensure customer: %w", err)
+			}
+			var orderID int64
+			err := tx.QueryRowContext(ctx, `
+				INSERT INTO orders (tenant_id, order_number, customer_id, customer_name, shipping_address, due_date, status, created_at)
+				VALUES ($1, $2, $3, $4, $6::jsonb, CURRENT_DATE - $5::int, 'shipped', now() - ($5::int + 3) * interval '1 day')
+				ON CONFLICT (tenant_id, order_number) DO NOTHING
+				RETURNING id`, tenantID, o.orderNumber, customerID, o.customerName, o.daysAgo, seedShipTo(o.customerName)).Scan(&orderID)
+			if err == sql.ErrNoRows {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("insert order: %w", err)
+			}
+			var itemID int64
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO print_items (order_id, file_name, color_material, quantity_required, quantity_completed, status, unit_price_cents)
+				VALUES ($1, 'shipped_part.stl', 'Grey PLA', $2, $2, 'packed', $3)
+				RETURNING id`, orderID, o.quantity, o.priceCents).Scan(&itemID); err != nil {
+				return fmt.Errorf("insert item: %w", err)
+			}
+			var shipmentID int64
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO shipments (order_id, tracking_number, shipped_at)
+				VALUES ($1, $2, now() - $3::int * interval '1 day')
+				RETURNING id`, orderID, "SEED-"+o.orderNumber, o.daysAgo).Scan(&shipmentID); err != nil {
+				return fmt.Errorf("insert shipment: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO shipment_items (shipment_id, print_item_id) VALUES ($1, $2)`, shipmentID, itemID); err != nil {
+				return fmt.Errorf("link shipment: %w", err)
+			}
+			return tx.Commit()
+		}(); err != nil {
+			return fmt.Errorf("seed %s: %w", o.orderNumber, err)
+		}
+	}
+	return nil
+}
+
+// seedShipTo builds a sample ship-to address (JSON for orders.shipping_address)
+// for a seeded customer.
+func seedShipTo(customerName string) string {
+	b, _ := json.Marshal(map[string]string{
+		"name": customerName, "line1": "123 Maker Lane", "city": "Austin", "state": "TX", "postal_code": "78701",
+	})
+	return string(b)
 }

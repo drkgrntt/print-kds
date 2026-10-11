@@ -60,17 +60,58 @@ transition (and its creation), each with who did it and when.
 ## Users & roles
 
 Each shop ("tenant") logs in separately at `/login` - `/signup` creates a
-brand-new shop and its first user in one step. There are two roles:
-`admin` (order intake at `/admin/new-order` and user management at
-`/admin/users`) and `staff` (can operate the board itself - every
-print-item transition - but not create orders or manage users). An admin
-can add teammates from `/admin/users`. See `docs/architecture.md` for how
-the session cookie ties a request to its tenant.
+brand-new shop and its first user in one step. There are three roles:
+`admin` (order intake at `/admin/new-order`, customers at
+`/admin/customers`, and user management at `/admin/users`), `staff` (can
+operate the board itself - every print-item transition - but not create
+orders or manage users), and `client` (a customer's own login - see
+"Client portal" below). An admin can add teammates and client logins from
+`/admin/users`. See `docs/architecture.md` for how the session cookie ties
+a request to its tenant.
+
+## Client portal
+
+A shop's clients can place orders themselves. An admin adds the client
+company under `/admin/customers`, then creates a `client` login for it on
+`/admin/users` (or `go run ./cmd/createuser -role client -customer "Acme"
+...`). A client logs in at `/login` and lands on `/portal`: their own order
+list and `/portal/new-order`, where they pick a ship-by date, attach one or
+more model files (`.stl`, `.3mf`, `.obj`, `.step`, `.gcode`, `.zip`),
+enter a ship-to address, and list print items (file, color, quantity). The
+order date is set
+automatically and the order number is generated. Clients see only their own
+customer's orders and files and have no access to the board. Staff see the
+order's placed date on each card and download its files from the card's
+`[ FILES ]` toggle.
+
+Uploaded files live on disk under `UPLOAD_DIR` (default `./data/uploads`),
+never under the public static directory, and are served only through
+authenticated, tenant-checked routes. `MAX_UPLOAD_MB` (default 100) caps a
+request's size.
+
+## Batched invoicing
+
+Admins bill shipped work in bulk from `/admin/invoices`. Pick a date range
+(it opens on the past 14 days) and optionally one customer, then
+**Preview**: every item that was packed and shipped in that range and isn't
+on an invoice yet. Cancelled items are never included, and a partially
+shipped order bills only the items that have shipped. Prices are set per
+item (staff type a unit price right in the preview); items without a price
+are listed but left out of the batch until priced. **Create invoices**
+makes one invoice per customer (numbered `INV-0001`, ...) and freezes each
+line's description, quantity and price. Re-running the same range never
+double-bills an item. Open any invoice for a clean, light, printable page -
+use the browser's Print / Save as PDF. Orders typed in with a one-off
+customer name (no customer record) can't be invoiced; pick a customer on
+`/admin/new-order`. Currency is assumed to be USD.
 
 ## Getting orders onto the board
 
-`/admin/new-order` is a manual entry form — order number, customer name,
-due date, and a list of print items (file name, color/material, quantity).
+`/admin/new-order` is a manual entry form — order number, customer (pick
+one from `/admin/customers` or type a one-off name), ship-by date, a
+ship-to address, and a list of print items (file name, color, quantity).
+Choosing a customer prefills the ship-to from their most recent order;
+clients get the same prefill on their portal form.
 Submitting it creates the order and its items (all starting `queued`) and
 redirects back to the form with a success banner, so entering several
 orders in a row doesn't lose your place. Every page links to it via the
@@ -81,8 +122,11 @@ only get onto the board by someone typing them in here.
 
 ## Schema
 
-Eight tables — `tenants`, `users` (FK → `tenants`), `sessions`
-(FK → `users`/`tenants`), `orders` (FK → `tenants`), `print_items`
+Twelve tables — `tenants`, `customers` (FK → `tenants`), `users`
+(FK → `tenants`, optionally `customers`), `sessions` (FK → `users`/
+`tenants`), `orders` (FK → `tenants`/`customers`), `order_files`
+(FK → `orders`), `invoices` (FK → `customers`) with `invoice_lines`
+(FK → `invoices`/`print_items`), `print_items`
 (FK → `orders`), `shipments` (FK → `orders`), `shipment_items` (a join
 table linking `shipments` to the specific `print_items` that shipped on
 them, enabling partial shipments), and `print_item_events` (an append-only

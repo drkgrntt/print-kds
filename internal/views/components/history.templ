@@ -35,3 +35,15 @@ templ HistoryList(events []board.PrintItemEvent) {
 		}
 	</ul>
 }
+
+// OrderFiles renders an order's uploaded files as download links - the
+// fragment swapped into a card's [ FILES ] toggle.
+templ OrderFiles(files []board.OrderFile) {
+	<ul class="card__history-list">
+		for _, f := range files {
+			<li class="card__history-item">
+				<a href={ templ.SafeURL(fmt.Sprintf("/files/%d", f.ID)) }>{ f.Filename }</a>
+			</li>
+		}
+	</ul>
+}

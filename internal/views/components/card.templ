@@ -44,6 +44,25 @@ templ Card(item board.PrintItem) {
 		<h3 class="card__file">{ item.FileName }</h3>
 		<p class="card__meta">{ item.ColorMaterial }</p>
 		<p class="card__meta">{ item.CustomerName }</p>
+		<p class="card__meta">{ fmt.Sprintf("Placed %s", item.OrderCreatedAt.Format("Jan 2")) }</p>
+		if item.Status == "ready_to_pack" && !item.ShipTo.IsEmpty() {
+			<p class="card__meta card__ship-to">
+				for _, line := range item.ShipTo.Lines() {
+					{ line }
+					<br/>
+				}
+			</p>
+		}
+		if item.FileCount > 0 {
+			<button
+				type="button"
+				class="btn btn--secondary card__history-toggle"
+				hx-get={ fmt.Sprintf("/orders/%d/files", item.OrderID) }
+				hx-target={ fmt.Sprintf("#item-%d-files", item.ID) }
+				hx-swap="innerHTML"
+			>{ fmt.Sprintf("[ FILES (%d) ]", item.FileCount) }</button>
+			<div id={ fmt.Sprintf("item-%d-files", item.ID) } class="card__history"></div>
+		}
 		if item.AssignedPrinter != "" {
 			<p class="card__meta">{ fmt.Sprintf("Printer: %s", item.AssignedPrinter) }</p>
 		}

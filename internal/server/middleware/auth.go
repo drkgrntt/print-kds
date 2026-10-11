@@ -31,6 +31,7 @@ func RequireAuth(authStore *auth.Store) fiber.Handler {
 		c.Locals("tenant_id", session.TenantID)
 		c.Locals("tenant_name", session.TenantName)
 		c.Locals("role", session.Role)
+		c.Locals("customer_id", session.CustomerID)
 		return c.Next()
 	}
 }
@@ -42,6 +43,29 @@ func RequireAuth(authStore *auth.Store) fiber.Handler {
 func RequireAdmin(c *fiber.Ctx) error {
 	if !IsAdmin(c) {
 		return c.Status(fiber.StatusForbidden).SendString("admins only")
+	}
+	return c.Next()
+}
+
+// RequireStaff gates the board to admin and staff users. A client user
+// (customer portal login) is sent to /portal on a plain page load and
+// refused with 403 on anything else (htmx transitions, POSTs).
+func RequireStaff(c *fiber.Ctx) error {
+	switch CurrentRole(c) {
+	case auth.RoleAdmin, auth.RoleStaff:
+		return c.Next()
+	case auth.RoleClient:
+		if c.Method() == fiber.MethodGet && c.Get("HX-Request") != "true" {
+			return c.Redirect("/portal", fiber.StatusSeeOther)
+		}
+	}
+	return c.Status(fiber.StatusForbidden).SendString("staff only")
+}
+
+// RequireClient gates the customer portal to RoleClient users.
+func RequireClient(c *fiber.Ctx) error {
+	if CurrentRole(c) != auth.RoleClient || CurrentCustomerID(c) == 0 {
+		return c.Status(fiber.StatusForbidden).SendString("clients only")
 	}
 	return c.Next()
 }
@@ -83,4 +107,24 @@ func CurrentRole(c *fiber.Ctx) auth.Role {
 
 func IsAdmin(c *fiber.Ctx) bool {
 	return CurrentRole(c) == auth.RoleAdmin
+}
+
+// CurrentCustomerID is the logged-in client's customer; 0 for admin/staff.
+// Portal handlers must scope by this, never by a form field or param.
+func CurrentCustomerID(c *fiber.Ctx) int64 {
+	id, _ := c.Locals("customer_id").(int64)
+	return id
+}
+
+func IsClient(c *fiber.Ctx) bool {
+	return CurrentRole(c) == auth.RoleClient
+}
+
+// HomePath is where a logged-in user lands: the board for staff/admin,
+// the portal for clients.
+func HomePath(role auth.Role) string {
+	if role == auth.RoleClient {
+		return "/portal"
+	}
+	return "/"
 }

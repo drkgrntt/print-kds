@@ -44,14 +44,20 @@ var ErrLastAdmin = errors.New("cannot remove the last admin for this shop")
 const sessionTTL = 30 * 24 * time.Hour
 
 // Role gates access to admin-only areas (order intake, user management -
-// see internal/server/middleware.RequireAdmin) versus ordinary board
-// operation, which every logged-in user can do regardless of role.
+// see internal/server/middleware.RequireAdmin), ordinary board operation
+// (admin and staff - see middleware.RequireStaff), and the client portal
+// (RoleClient only - a customer's own login, tied to one customers row).
 type Role string
 
 const (
-	RoleAdmin Role = "admin"
-	RoleStaff Role = "staff"
+	RoleAdmin  Role = "admin"
+	RoleStaff  Role = "staff"
+	RoleClient Role = "client"
 )
+
+// ErrClientNeedsCustomer is returned when a client user is created without
+// a customer, or a non-client user is created with one.
+var ErrClientNeedsCustomer = errors.New("client users must belong to a customer, and only client users can")
 
 // User mirrors a users row.
 type User struct {
@@ -59,6 +65,8 @@ type User struct {
 	TenantID int64
 	Email    string
 	Role     Role
+	// CustomerID is set only for RoleClient users.
+	CustomerID int64
 }
 
 // Session is what a valid session cookie resolves to - joined against
@@ -70,6 +78,7 @@ type Session struct {
 	TenantID   int64
 	TenantName string
 	Role       Role
+	CustomerID int64 // 0 unless Role is RoleClient
 	ExpiresAt  time.Time
 }
 
@@ -144,10 +153,11 @@ func (s *Store) Authenticate(ctx context.Context, email, password string) (User,
 
 	var user User
 	var hash string
+	var customerID sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, email, password_hash, role FROM users WHERE email = $1`,
+		`SELECT id, tenant_id, email, password_hash, role, customer_id FROM users WHERE email = $1`,
 		email,
-	).Scan(&user.ID, &user.TenantID, &user.Email, &hash, &user.Role)
+	).Scan(&user.ID, &user.TenantID, &user.Email, &hash, &user.Role, &customerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrInvalidCredentials
@@ -158,6 +168,7 @@ func (s *Store) Authenticate(ctx context.Context, email, password string) (User,
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
 		return User{}, ErrInvalidCredentials
 	}
+	user.CustomerID = customerID.Int64
 	return user, nil
 }
 
@@ -190,20 +201,22 @@ VALUES ($1, $2, $3, $4)`,
 // sessions row at creation time.
 func (s *Store) ValidateSession(ctx context.Context, token string) (Session, error) {
 	var sess Session
+	var customerID sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-SELECT s.user_id, s.tenant_id, t.name, u.role, s.expires_at
+SELECT s.user_id, s.tenant_id, t.name, u.role, u.customer_id, s.expires_at
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 JOIN tenants t ON t.id = s.tenant_id
 WHERE s.token_hash = $1 AND s.expires_at > now()`,
 		hashToken(token),
-	).Scan(&sess.UserID, &sess.TenantID, &sess.TenantName, &sess.Role, &sess.ExpiresAt)
+	).Scan(&sess.UserID, &sess.TenantID, &sess.TenantName, &sess.Role, &customerID, &sess.ExpiresAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Session{}, ErrSessionNotFound
 		}
 		return Session{}, fmt.Errorf("load session: %w", err)
 	}
+	sess.CustomerID = customerID.Int64
 	return sess, nil
 }
 
@@ -225,7 +238,7 @@ func hashToken(token string) string {
 // /admin/users management page.
 func (s *Store) ListUsers(ctx context.Context, tenantID int64) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, tenant_id, email, role FROM users WHERE tenant_id = $1 ORDER BY email`,
+		`SELECT id, tenant_id, email, role, customer_id FROM users WHERE tenant_id = $1 ORDER BY email`,
 		tenantID,
 	)
 	if err != nil {
@@ -236,9 +249,11 @@ func (s *Store) ListUsers(ctx context.Context, tenantID int64) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.TenantID, &u.Email, &u.Role); err != nil {
+		var customerID sql.NullInt64
+		if err := rows.Scan(&u.ID, &u.TenantID, &u.Email, &u.Role, &customerID); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
+		u.CustomerID = customerID.Int64
 		users = append(users, u)
 	}
 	if err := rows.Err(); err != nil {
@@ -247,22 +262,55 @@ func (s *Store) ListUsers(ctx context.Context, tenantID int64) ([]User, error) {
 	return users, nil
 }
 
-// CreateUser adds a teammate to an already-existing tenant - the
-// admin-driven counterpart to SignUp, which instead creates a brand-new
-// tenant. Returns ErrDuplicateEmail the same way SignUp does.
+// CreateUser adds an admin/staff teammate to an already-existing tenant -
+// the admin-driven counterpart to SignUp, which instead creates a
+// brand-new tenant. Returns ErrDuplicateEmail the same way SignUp does.
+// Client logins go through CreateClientUser.
 func (s *Store) CreateUser(ctx context.Context, tenantID int64, email, password string, role Role) (User, error) {
+	if role == RoleClient {
+		return User{}, ErrClientNeedsCustomer
+	}
+	return s.createUser(ctx, tenantID, 0, email, password, role)
+}
+
+// CreateClientUser adds a login for customerID's company. The customer is
+// verified to belong to tenantID, so a client can never be attached to
+// another shop's customer.
+func (s *Store) CreateClientUser(ctx context.Context, tenantID, customerID int64, email, password string) (User, error) {
+	if customerID == 0 {
+		return User{}, ErrClientNeedsCustomer
+	}
+	return s.createUser(ctx, tenantID, customerID, email, password, RoleClient)
+}
+
+func (s *Store) createUser(ctx context.Context, tenantID, customerID int64, email, password string, role Role) (User, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return User{}, fmt.Errorf("hash password: %w", err)
 	}
 
+	var cust sql.NullInt64
+	if customerID != 0 {
+		var ok bool
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM customers WHERE id = $1 AND tenant_id = $2)`,
+			customerID, tenantID,
+		).Scan(&ok); err != nil {
+			return User{}, fmt.Errorf("check customer %d: %w", customerID, err)
+		}
+		if !ok {
+			return User{}, fmt.Errorf("customer %d not found for tenant %d", customerID, tenantID)
+		}
+		cust = sql.NullInt64{Int64: customerID, Valid: true}
+	}
+
 	email = normalizeEmail(email)
-	user := User{TenantID: tenantID, Email: email, Role: role}
+	user := User{TenantID: tenantID, Email: email, Role: role, CustomerID: customerID}
 	if err := s.db.QueryRowContext(ctx, `
-INSERT INTO users (tenant_id, email, password_hash, role)
-VALUES ($1, $2, $3, $4)
+INSERT INTO users (tenant_id, email, password_hash, role, customer_id)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id`,
-		tenantID, email, string(hash), string(role),
+		tenantID, email, string(hash), string(role), cust,
 	).Scan(&user.ID); err != nil {
 		if isUniqueViolation(err) {
 			return User{}, fmt.Errorf("%w: %q", ErrDuplicateEmail, email)

@@ -24,15 +24,16 @@ func NewBoardController(store *board.Store) *BoardController {
 }
 
 func (b *BoardController) RegisterRoutes(app *fiber.App) {
-	app.Get("/", b.handleBoard)
-	app.Post("/print-items/:id/start", b.handleStartPrint)
-	app.Post("/print-items/:id/pop", b.handleTransition(b.store.PopOffBed))
-	app.Post("/print-items/:id/fail-print", b.handleFailPrint)
-	app.Post("/print-items/:id/qc-result", b.handleQCResult)
-	app.Post("/print-items/:id/generate-label", b.handleGenerateLabel)
-	app.Post("/print-items/:id/cancel", b.handleTransition(b.store.CancelItem))
-	app.Post("/print-items/:id/quantity", b.handleUpdateQuantity)
-	app.Get("/print-items/:id/history", b.handleItemHistory)
+	app.Get("/", middleware.RequireStaff, b.handleBoard)
+	app.Post("/print-items/:id/start", middleware.RequireStaff, b.handleStartPrint)
+	app.Post("/print-items/:id/pop", middleware.RequireStaff, b.handleTransition(b.store.PopOffBed))
+	app.Post("/print-items/:id/fail-print", middleware.RequireStaff, b.handleFailPrint)
+	app.Post("/print-items/:id/qc-result", middleware.RequireStaff, b.handleQCResult)
+	app.Post("/print-items/:id/generate-label", middleware.RequireStaff, b.handleGenerateLabel)
+	app.Post("/print-items/:id/cancel", middleware.RequireStaff, b.handleTransition(b.store.CancelItem))
+	app.Post("/print-items/:id/quantity", middleware.RequireStaff, b.handleUpdateQuantity)
+	app.Get("/print-items/:id/history", middleware.RequireStaff, b.handleItemHistory)
+	app.Get("/orders/:id/files", middleware.RequireStaff, b.handleOrderFiles)
 }
 
 func (b *BoardController) handleBoard(c *fiber.Ctx) error {
@@ -224,6 +225,21 @@ func (b *BoardController) handleItemHistory(c *fiber.Ctx) error {
 	}
 
 	return render(c, components.HistoryList(events))
+}
+
+// handleOrderFiles serves a card's [ FILES ] toggle: download links for
+// an order's uploaded files, tenant-scoped like every other read.
+func (b *BoardController) handleOrderFiles(c *fiber.Ctx) error {
+	orderID, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("invalid order id")
+	}
+	files, err := b.store.ListOrderFiles(c.Context(), middleware.CurrentTenantID(c), 0, orderID)
+	if err != nil {
+		logger.Error("load order files", "error", err)
+		return c.Status(fiber.StatusInternalServerError).SendString("failed to load files")
+	}
+	return render(c, components.OrderFiles(files))
 }
 
 // writeOOBSwap writes the delete-old-card + insert-new-card OOB fragment

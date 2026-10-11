@@ -1,6 +1,6 @@
 # Schema
 
-Eight tables, thirteen migrations (`internal/database/migrations/`),
+Twelve tables, fifteen migrations (`internal/database/migrations/`),
 goose-managed and applied automatically on startup. No ORM — raw SQL via
 `database/sql` + `pgx`.
 
@@ -10,6 +10,7 @@ goose-managed and applied automatically on startup. No ORM — raw SQL via
 |---|---|---|
 | `id` | `BIGSERIAL PRIMARY KEY` | |
 | `name` | `TEXT NOT NULL` | shop display name, shown in the app bar |
+| `next_invoice_number` | `BIGINT NOT NULL DEFAULT 1` | per-tenant invoice counter; `CreateBatch` bumps it with `UPDATE ... RETURNING` inside its transaction, so concurrent batches serialize on the tenant row and never reuse a number |
 | `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
 
 No slug/subdomain column — tenant resolution is login-based (see
@@ -23,7 +24,8 @@ No slug/subdomain column — tenant resolution is login-based (see
 | `tenant_id` | `BIGINT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE` | one user belongs to exactly one tenant |
 | `email` | `TEXT NOT NULL UNIQUE` | globally unique — login is by email, not scoped per shop |
 | `password_hash` | `TEXT NOT NULL` | bcrypt (`auth.Store.SignUp`/`CreateUser`) |
-| `role` | `TEXT NOT NULL DEFAULT 'staff'` | `CHECK` restricted to `admin`, `staff` — `admin` can create orders (`/admin/new-order`) and manage users (`/admin/users`); `staff` can operate the board (every print-item transition) but not either of those |
+| `role` | `TEXT NOT NULL DEFAULT 'staff'` | `CHECK` restricted to `admin`, `staff`, `client` — `admin` can create orders (`/admin/new-order`), manage customers and users; `staff` can operate the board (every print-item transition) but not those; `client` is a customer's portal login (`/portal`) with no board access |
+| `customer_id` | `BIGINT REFERENCES customers (id) ON DELETE CASCADE` | set only for `client` users (`CHECK ((role = 'client') = (customer_id IS NOT NULL))`); `auth.Store.CreateClientUser` verifies the customer belongs to the same tenant |
 | `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
 
 Index: `tenant_id`.
@@ -44,6 +46,20 @@ scheduled yet). `role` is deliberately *not* stored here — see
 lookup so a role change takes effect on the next request rather than
 waiting for the session to be re-created.
 
+## `customers`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `BIGSERIAL PRIMARY KEY` | |
+| `tenant_id` | `BIGINT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE` | |
+| `name` | `TEXT NOT NULL` | `UNIQUE (tenant_id, name)` |
+| `billing_address` | `TEXT NOT NULL DEFAULT ''` | |
+| `email` | `TEXT NOT NULL DEFAULT ''` | billing email |
+| `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
+
+A shop's client company. Client users (`users.customer_id`) log in on its
+behalf and see only orders with a matching `orders.customer_id`.
+
 ## `orders`
 
 | Column | Type | Notes |
@@ -51,9 +67,10 @@ waiting for the session to be re-created.
 | `id` | `BIGSERIAL PRIMARY KEY` | |
 | `tenant_id` | `BIGINT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE` | added by `00011_add_tenant_id_to_orders.sql`, backfilled onto a "Default Shop" tenant for any order that predates multi-tenancy |
 | `order_number` | `TEXT NOT NULL` | customer-facing identifier; unique *per tenant* (see below), not globally |
-| `customer_name` | `TEXT NOT NULL` | |
-| `shipping_address` | `JSONB NOT NULL DEFAULT '{}'` | free-form; no fixed address schema |
-| `due_date` | `DATE NOT NULL` | drives the "To Print" column's sort order within the reprint-priority grouping (see `print_items.reprint_count` and `board.Store.BoardColumns`) |
+| `customer_id` | `BIGINT REFERENCES customers (id) ON DELETE SET NULL` | nullable: orders typed in with a one-off name have no customer link. Added by `00014`, which backfilled one customer per distinct `(tenant_id, customer_name)` |
+| `customer_name` | `TEXT NOT NULL` | display name; copied from the customer when `customer_id` is set |
+| `shipping_address` | `JSONB NOT NULL DEFAULT '{}'` | the order's ship-to address as a JSON object (`board.ShipTo`: `name`, `line1`, `line2`, `city`, `state`, `postal_code`, `country`). Required (name, street, city, state, postal code) on both order forms; `'{}'` on orders that predate it, which the board simply doesn't show an address for |
+| `due_date` | `DATE NOT NULL` | the order's **ship-by date** (labelled that way in the UI); drives the "To Print" column's sort order within the reprint-priority grouping (see `print_items.reprint_count` and `board.Store.BoardColumns`) |
 | `status` | `TEXT NOT NULL DEFAULT 'pending'` | `CHECK` restricted to `pending`, `in_progress`, `completed`, `shipped`, `cancelled` — derived from its items' statuses, see `board.Store.CancelItem`'s order-cancellation cascade in `docs/architecture.md` |
 | `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
 
@@ -78,6 +95,7 @@ shop from ever using it).
 | `reprint_count` | `INTEGER NOT NULL DEFAULT 0` | how many times this row (or, for a split row, its original) has failed to produce a usable print; incremented by `RecordQCResult` on a full or partial QC failure, or by `FailPrint` on a mid-print failure |
 | `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
 | `status_changed_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | time of this row's most recent status transition; overwritten to `now()` by every transition method (`StartPrint`, `PopOffBed`, `FailPrint`, `RecordQCResult`, `GenerateLabel`, `CancelItem`) and by `UpdateQuantity`'s same-status edit, so `now() - status_changed_at` shows how long a card has been sitting in its current board column - not a full transition history, just the latest move |
+| `unit_price_cents` | `BIGINT CHECK (unit_price_cents >= 0)` | nullable; set by staff from the invoice preview (`board.Store.SetItemPrice`), which refuses once the item is on an invoice. Items without a price are skipped by `CreateBatch`. Currency is assumed USD |
 | `last_updated_by` | `BIGINT REFERENCES users (id) ON DELETE SET NULL` | who most recently ran a transition on this row (or created it, via `CreateOrder`); nullable and `ON DELETE SET NULL` so a departed user's historical items don't break or cascade-delete. Surfaced on `PrintItem` as `LastUpdatedByEmail` via a `LEFT JOIN users`; see `print_item_events` below for the full history, not just the latest touch |
 
 Indexes: `order_id`, `status`. `ON DELETE CASCADE` — deleting an order
@@ -134,11 +152,55 @@ who touched a card". No `tenant_id` column, same convention as
 `print_items`/`shipments`: `board.Store.ItemHistory` scopes it through the
 join to `print_items`/`orders` instead.
 
+## `order_files`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `BIGSERIAL PRIMARY KEY` | |
+| `order_id` | `BIGINT NOT NULL REFERENCES orders (id) ON DELETE CASCADE` | |
+| `filename` | `TEXT NOT NULL` | sanitized display/download name |
+| `stored_path` | `TEXT NOT NULL` | on-disk path under `UPLOAD_DIR` (random name); never served statically |
+| `size_bytes` | `BIGINT NOT NULL` | |
+| `content_type` | `TEXT NOT NULL DEFAULT ''` | |
+| `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
+
+Index: `order_id`. No `tenant_id`; scoped through `orders` like
+`print_items` (`board.Store.GetOrderFile`/`ListOrderFiles`). Deleting a
+row or its order does not delete the file on disk.
+
+## `invoices`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `BIGSERIAL PRIMARY KEY` | |
+| `tenant_id` | `BIGINT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE` | |
+| `customer_id` | `BIGINT NOT NULL REFERENCES customers (id) ON DELETE CASCADE` | one invoice per customer per batch |
+| `number` | `BIGINT NOT NULL` | `UNIQUE (tenant_id, number)`; shown as `INV-0001` |
+| `period_start` / `period_end` | `DATE NOT NULL` | the shipped-date range the batch covered (inclusive) |
+| `total_cents` | `BIGINT NOT NULL` | sum of its lines |
+| `created_by` | `BIGINT REFERENCES users (id) ON DELETE SET NULL` | |
+| `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
+
+## `invoice_lines`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `BIGSERIAL PRIMARY KEY` | |
+| `invoice_id` | `BIGINT NOT NULL REFERENCES invoices (id) ON DELETE CASCADE` | |
+| `print_item_id` | `BIGINT NOT NULL UNIQUE REFERENCES print_items (id) ON DELETE CASCADE` | the `UNIQUE` is what guarantees an item is invoiced at most once |
+| `order_number`, `description`, `quantity`, `unit_price_cents`, `line_total_cents`, `shipped_at` | | snapshots taken at invoice time, so later edits never rewrite a past invoice. `quantity` is the item's `quantity_completed` |
+
 ## Relationships
 
 ```
 tenants (1) ──< users     (many)
 tenants (1) ──< orders    (many)
+tenants (1) ──< customers (many)
+customers (1) ──< users   (many, client role only)
+customers (1) ──< orders  (many, nullable)
+orders (1)      ──< order_files       (many)
+customers (1)   ──< invoices          (many)
+invoices (1)    ──< invoice_lines     (many) >── (1) print_items
 tenants (1) ──< sessions  (many, denormalized from users)
 users (1)   ──< sessions  (many)
 

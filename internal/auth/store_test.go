@@ -238,3 +238,55 @@ func TestDeleteUser_WrongTenantIsNoop(t *testing.T) {
 		t.Errorf("shop B users = %+v, want owner B untouched", users)
 	}
 }
+
+func TestClientUsers(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	admin, err := s.SignUp(ctx, "Shop C", uniqueEmail(t), "password123")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	cleanupTenant(t, s, admin.TenantID)
+	other, err := s.SignUp(ctx, "Shop D", "d-"+uniqueEmail(t), "password123")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	cleanupTenant(t, s, other.TenantID)
+
+	var custID, otherCustID int64
+	if err := s.db.QueryRowContext(ctx, `INSERT INTO customers (tenant_id, name) VALUES ($1, 'Acme') RETURNING id`, admin.TenantID).Scan(&custID); err != nil {
+		t.Fatalf("insert customer: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `INSERT INTO customers (tenant_id, name) VALUES ($1, 'Other') RETURNING id`, other.TenantID).Scan(&otherCustID); err != nil {
+		t.Fatalf("insert customer: %v", err)
+	}
+
+	if _, err := s.CreateUser(ctx, admin.TenantID, uniqueEmail(t)+"x", "password123", RoleClient); !errors.Is(err, ErrClientNeedsCustomer) {
+		t.Errorf("CreateUser(client) err = %v, want ErrClientNeedsCustomer", err)
+	}
+	if _, err := s.CreateClientUser(ctx, admin.TenantID, 0, uniqueEmail(t)+"y", "password123"); !errors.Is(err, ErrClientNeedsCustomer) {
+		t.Errorf("CreateClientUser(no customer) err = %v, want ErrClientNeedsCustomer", err)
+	}
+	if _, err := s.CreateClientUser(ctx, admin.TenantID, otherCustID, uniqueEmail(t)+"z", "password123"); err == nil {
+		t.Error("CreateClientUser attached another tenant's customer; want error")
+	}
+
+	email := "client-" + uniqueEmail(t)
+	client, err := s.CreateClientUser(ctx, admin.TenantID, custID, email, "password123")
+	if err != nil {
+		t.Fatalf("CreateClientUser: %v", err)
+	}
+	authed, err := s.Authenticate(ctx, email, "password123")
+	if err != nil || authed.Role != RoleClient || authed.CustomerID != custID {
+		t.Fatalf("Authenticate = %+v, %v; want client with customer %d", authed, err, custID)
+	}
+	token, _, err := s.CreateSession(ctx, client)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sess, err := s.ValidateSession(ctx, token)
+	if err != nil || sess.Role != RoleClient || sess.CustomerID != custID {
+		t.Fatalf("ValidateSession = %+v, %v; want client with customer %d", sess, err, custID)
+	}
+}

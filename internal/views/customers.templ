@@ -1,0 +1,55 @@
+package views
+
+import "print-kds/internal/board"
+
+// CustomersPageData is /admin/customers: the tenant's client companies
+// plus the add form.
+type CustomersPageData struct {
+	Customers []board.Customer
+	Error     string
+	Layout    LayoutData
+}
+
+templ CustomersPage(data CustomersPageData) {
+	@Layout("Customers - Print Shop KDS", data.Layout) {
+		<main class="intake">
+			<h1>Customers</h1>
+			if data.Error != "" {
+				<p class="banner banner--error">{ data.Error }</p>
+			}
+			<table class="users-table">
+				<thead>
+					<tr>
+						<th>Name</th>
+						<th>Email</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, c := range data.Customers {
+						<tr>
+							<td>{ c.Name }</td>
+							<td>{ c.Email }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+			<h2>Add a customer</h2>
+			<form method="post" action="/admin/customers" class="order-form">
+				<label class="field">
+					<span>Company / name</span>
+					<input type="text" name="name" required/>
+				</label>
+				<label class="field">
+					<span>Billing email</span>
+					<input type="email" name="email"/>
+				</label>
+				<label class="field">
+					<span>Billing address</span>
+					<input type="text" name="billing_address"/>
+				</label>
+				<button type="submit" class="btn btn--primary">Add Customer</button>
+			</form>
+			<p>Client logins are created under <a href="/admin/users">Users</a>.</p>
+		</main>
+	}
+}

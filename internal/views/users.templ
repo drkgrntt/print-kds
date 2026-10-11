@@ -1,8 +1,10 @@
 package views
 
 import (
-	"print-kds/internal/auth"
 	"fmt"
+
+	"print-kds/internal/auth"
+	"print-kds/internal/board"
 )
 
 // UsersPageData is the /admin/users page's input: the tenant's current
@@ -10,9 +12,21 @@ import (
 // LastAdminError surfaced from a rejected delete (auth.ErrLastAdmin).
 type UsersPageData struct {
 	Users              []auth.User
+	Customers          []board.Customer
 	Error              string
 	CurrentUserID      int64
 	Layout             LayoutData
+}
+
+// customerName resolves a client user's customer for the list; "" for
+// admin/staff (no customer).
+func customerName(customers []board.Customer, id int64) string {
+	for _, c := range customers {
+		if c.ID == id {
+			return c.Name
+		}
+	}
+	return ""
 }
 
 templ UsersPage(data UsersPageData) {
@@ -27,6 +41,7 @@ templ UsersPage(data UsersPageData) {
 					<tr>
 						<th>Email</th>
 						<th>Role</th>
+						<th>Customer</th>
 						<th></th>
 					</tr>
 				</thead>
@@ -35,6 +50,7 @@ templ UsersPage(data UsersPageData) {
 						<tr>
 							<td>{ u.Email }</td>
 							<td>{ string(u.Role) }</td>
+							<td>{ customerName(data.Customers, u.CustomerID) }</td>
 							<td>
 								if u.ID != data.CurrentUserID {
 									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/admin/users/%d/delete", u.ID)) }>
@@ -61,6 +77,16 @@ templ UsersPage(data UsersPageData) {
 					<select name="role">
 						<option value="staff">Staff</option>
 						<option value="admin">Admin</option>
+						<option value="client">Client (customer portal)</option>
+					</select>
+				</label>
+				<label class="field">
+					<span>Customer (client logins only)</span>
+					<select name="customer_id">
+						<option value="0">-</option>
+						for _, c := range data.Customers {
+							<option value={ fmt.Sprint(c.ID) }>{ c.Name }</option>
+						}
 					</select>
 				</label>
 				<button type="submit" class="btn btn--primary">Add User</button>
