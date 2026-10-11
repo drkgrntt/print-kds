@@ -16,12 +16,12 @@
 
 .banner--success {
 	background: var(--color-success);
-	color: var(--color-bg);
+	color: var(--color-on-fill);
 }
 
 .banner--error {
 	background: var(--color-danger);
-	color: #1a0505;
+	color: var(--color-on-danger);
 }
 
 .order-form {

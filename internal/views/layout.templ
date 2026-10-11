@@ -11,12 +11,13 @@ type LayoutData struct {
 
 templ Layout(title string, data LayoutData) {
 	<!DOCTYPE html>
-	<html lang="en" data-theme="dark">
+	<html lang="en">
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title }</title>
 			<link rel="icon" href="/static/favicon.svg" type="image/svg+xml"/>
+			<script src="/static/js/theme.js"></script>
 			<link rel="stylesheet" href="/static/css/tokens.css"/>
 			<link rel="stylesheet" href="/static/css/base.css"/>
 			<link rel="stylesheet" href="/static/css/board.css"/>
@@ -29,8 +30,8 @@ templ Layout(title string, data LayoutData) {
 				} else {
 					<a href="/" class="app-bar__title">Print Shop KDS</a>
 				}
-				if data.TenantName != "" {
-					<div class="app-bar__actions">
+				<div class="app-bar__actions">
+					if data.TenantName != "" {
 						<span class="app-bar__tenant">{ data.TenantName }</span>
 						if data.IsAdmin {
 							<a href="/admin/new-order" class="app-bar__link">+ New Order</a>
@@ -45,8 +46,12 @@ templ Layout(title string, data LayoutData) {
 						<form method="post" action="/logout" class="app-bar__logout-form">
 							<button type="submit" class="app-bar__link-button">Log Out</button>
 						</form>
-					</div>
-				}
+					}
+					<button type="button" class="theme-toggle" onclick="toggleTheme()" aria-label="Switch between light and dark theme" title="Switch between light and dark theme">
+						<svg class="theme-toggle__sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+						<svg class="theme-toggle__moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+					</button>
+				</div>
 			</header>
 			{ children... }
 			<script src="/static/js/htmx.min.js"></script>

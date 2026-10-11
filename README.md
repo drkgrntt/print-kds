@@ -17,7 +17,7 @@ shops, each logged in and seeing only its own board and orders.
   [goose](https://github.com/pressly/goose) migrations, embedded and run
   automatically on startup — no separate migrate step
 - **Styling**: plain, hand-written CSS — no Tailwind or other utility
-  framework. High-contrast dark theme, touch targets sized for a shop
+  framework. High-contrast dark and light themes (follows the system setting; header toggle overrides), touch targets sized for a shop
   floor, not a desk
 
 ## The board

@@ -1,4 +1,9 @@
 :root {
+	/* Dark is the default palette; the light overrides below apply when the
+	   OS prefers light (and nothing is saved) or [data-theme="light"] is set
+	   by js/theme.js. Same structure as the journal's theme/colors.css. */
+	color-scheme: light dark;
+
 	--color-bg: #0b0d10;
 	--color-surface: #15181d;
 	--color-surface-raised: #1e2229;
@@ -9,6 +14,9 @@
 	--color-success: #3ddc84;
 	--color-danger: #ff5c5c;
 	--color-accent: #ffb020;
+	--color-accent-text: #ffb020;
+	--color-on-fill: #0b0d10;
+	--color-on-danger: #1a0505;
 
 	--radius-md: 8px;
 	--radius-lg: 14px;
@@ -21,4 +29,38 @@
 	/* Kiosk buttons are tapped with a finger, sometimes a gloved one - 48px
 	   is the accepted minimum comfortable touch target size. */
 	--touch-target-min: 48px;
+}
+
+@media (prefers-color-scheme: light) {
+	:root:not([data-theme="dark"]) {
+		--color-bg: #f2f4f7;
+		--color-surface: #ffffff;
+		--color-surface-raised: #e8ebf0;
+		--color-border: #b6bdc7;
+		--color-text: #14181d;
+		--color-text-muted: #4d5762;
+
+		--color-success: #2fb26a;
+		--color-danger: #c62828;
+		--color-accent: #f5a30a;
+		--color-accent-text: #8a4b00;
+		--color-on-fill: #0b0d10;
+		--color-on-danger: #ffffff;
+	}
+}
+
+:root[data-theme="light"] {
+	--color-bg: #f2f4f7;
+	--color-surface: #ffffff;
+	--color-surface-raised: #e8ebf0;
+	--color-border: #b6bdc7;
+	--color-text: #14181d;
+	--color-text-muted: #4d5762;
+
+	--color-success: #2fb26a;
+	--color-danger: #c62828;
+	--color-accent: #f5a30a;
+	--color-accent-text: #8a4b00;
+	--color-on-fill: #0b0d10;
+	--color-on-danger: #ffffff;
 }
