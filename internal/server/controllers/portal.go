@@ -109,7 +109,7 @@ func (p *PortalController) handleCreate(c *fiber.Ctx) error {
 	// generated one. A collision is vanishingly unlikely, so retry once.
 	var orderNumber string
 	for attempt := 0; attempt < 2; attempt++ {
-		orderNumber = generateOrderNumber()
+		orderNumber = generateOrderNumber("WEB")
 		in.OrderNumber = orderNumber
 		_, err = p.store.CreateOrder(c.Context(), tenantID, middleware.CurrentUserID(c), in)
 		if !errors.Is(err, board.ErrDuplicateOrderNumber) {
@@ -125,10 +125,10 @@ func (p *PortalController) handleCreate(c *fiber.Ctx) error {
 	return c.Redirect("/portal?created="+orderNumber, fiber.StatusSeeOther)
 }
 
-func generateOrderNumber() string {
+func generateOrderNumber(prefix string) string {
 	raw := make([]byte, 3)
 	_, _ = rand.Read(raw)
-	return fmt.Sprintf("WEB-%s-%s", time.Now().Format("20060102"), strings.ToUpper(hex.EncodeToString(raw)))
+	return fmt.Sprintf("%s-%s-%s", prefix, time.Now().Format("20060102"), strings.ToUpper(hex.EncodeToString(raw)))
 }
 
 func (p *PortalController) handleClientFile(c *fiber.Ctx) error {

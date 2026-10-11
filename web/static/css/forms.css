@@ -123,3 +123,14 @@
 	color: var(--color-text);
 	font-size: 1rem;
 }
+
+.field__row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.field__row input {
+  flex: 1;
+  min-width: 0;
+}

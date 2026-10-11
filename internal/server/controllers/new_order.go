@@ -40,6 +40,7 @@ func (n *NewOrderController) RegisterRoutes(app *fiber.App) {
 	app.Get("/admin/new-order", middleware.RequireAdmin, n.handleForm)
 	app.Post("/admin/new-order", middleware.RequireAdmin, n.handleCreate)
 	app.Get("/admin/new-order/item-row", middleware.RequireAdmin, n.handleItemRow)
+	app.Get("/admin/new-order/generate-number", middleware.RequireAdmin, n.handleGenerateNumber)
 	app.Get("/admin/new-order/ship-to", middleware.RequireAdmin, n.handleShipTo)
 }
 
@@ -55,6 +56,13 @@ func (n *NewOrderController) handleForm(c *fiber.Ctx) error {
 	}
 	layout := views.LayoutData{TenantName: middleware.CurrentTenantName(c), IsAdmin: middleware.IsAdmin(c)}
 	return render(c, views.NewOrderForm(data, layout))
+}
+
+// handleGenerateNumber serves the Generate button's htmx request: the order
+// number input refilled with a number from the same generator (with an ADM- prefix) the client
+// portal uses.
+func (n *NewOrderController) handleGenerateNumber(c *fiber.Ctx) error {
+	return render(c, views.OrderNumberInput(generateOrderNumber("ADM")))
 }
 
 // handleShipTo serves the customer select's htmx request: the ship-to

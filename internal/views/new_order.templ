@@ -43,7 +43,10 @@ templ NewOrderForm(data NewOrderFormData, layout LayoutData) {
 			<form method="post" action="/admin/new-order" class="order-form">
 				<label class="field">
 					<span>Order number</span>
-					<input type="text" name="order_number" value={ data.OrderNumber } required/>
+					<div class="field__row">
+						@OrderNumberInput(data.OrderNumber)
+						<button type="button" class="btn" hx-get="/admin/new-order/generate-number" hx-target="#order-number" hx-swap="outerHTML">Generate</button>
+					</div>
 				</label>
 				<label class="field">
 					<span>Customer</span>
@@ -121,4 +124,10 @@ templ ItemRow(row NewOrderItemRow) {
 		<input type="text" name="color_material" placeholder="Color" value={ row.ColorMaterial }/>
 		<input type="number" name="quantity_required" placeholder="Qty" min="1" value={ row.Quantity }/>
 	</div>
+}
+
+// OrderNumberInput is the order number field on its own so the Generate
+// button's htmx request can swap in a freshly filled one.
+templ OrderNumberInput(value string) {
+	<input type="text" id="order-number" name="order_number" value={ value } required/>
 }
